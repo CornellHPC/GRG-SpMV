@@ -39,7 +39,7 @@ from pygrgl_spmv.tests.runtime._streaming_cases import (
 
 cp = pytest.importorskip("cupy")
 
-pytestmark = [pytest.mark.gpu, pytest.mark.cusparse]
+pytestmark = [pytest.mark.cuda13, pytest.mark.cusparse]
 
 _MODE_BY_NAME = {mode.name: mode for mode in THREE_BLOCK_TRANSITION_MODES}
 _THREE_BLOCK_KEYS = ((1, 0), (2, 0), (2, 1))

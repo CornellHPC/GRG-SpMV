@@ -213,7 +213,7 @@ def _operand(grg, spec):
     return np.random.default_rng(9091).standard_normal((spec.k, cols), dtype=DATA_DTYPE)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 @pytest.mark.parametrize(("factory", "name"), _FACTORIES)
 def test_every_captured_key_matches_the_eager_path(missing_artifact, factory, name):
@@ -248,7 +248,7 @@ def test_every_captured_key_matches_the_eager_path(missing_artifact, factory, na
             )
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_uncaptured_key_raises_instead_of_returning_the_no_init_answer(missing_artifact):
     """The headline fix: this used to return a confidently wrong number."""
@@ -262,7 +262,7 @@ def test_uncaptured_key_raises_instead_of_returning_the_no_init_answer(missing_a
             grg.matmul(x, "up", by_individual=True, init=np.array([3.0]))
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_uncaptured_key_error_names_both_sides(missing_artifact):
     with contextlib.ExitStack() as stack:
@@ -278,7 +278,7 @@ def test_uncaptured_key_error_names_both_sides(missing_artifact):
     assert "('up', False, 'none', False, False)" in message
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 @pytest.mark.parametrize("payload", ["init", "miss"])
 def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload):
@@ -307,7 +307,7 @@ def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload)
             grg.matmul(x, "up", **kwargs)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 @pytest.mark.parametrize(
     "make_bad",
@@ -328,7 +328,7 @@ def test_degenerate_input_shapes_raise_like_the_eager_path(missing_artifact, mak
             grg.matmul(make_bad(grg), "up")
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_short_input_is_still_zero_padded_and_truncated(missing_artifact):
     """The pad/truncate path is load-bearing for any block solver that varies k."""
@@ -342,7 +342,7 @@ def test_short_input_is_still_zero_padded_and_truncated(missing_artifact):
             np.testing.assert_allclose(got, eager.matmul(x, "up"), atol=atol, rtol=rtol)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 @pytest.mark.parametrize("direction", ["up", "down"])
 def test_emit_all_nodes_is_supported_when_captured(missing_artifact, missing_grg, direction):
@@ -374,7 +374,7 @@ def test_emit_all_nodes_is_supported_when_captured(missing_artifact, missing_grg
     np.testing.assert_allclose(got, expected, atol=atol, rtol=rtol)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_emit_all_nodes_raises_when_not_captured(missing_artifact):
     with contextlib.ExitStack() as stack:
@@ -386,7 +386,7 @@ def test_emit_all_nodes_raises_when_not_captured(missing_artifact):
             grg.matmul(np.ones((1, grg.num_samples), dtype=DATA_DTYPE), "up", emit_all_nodes=True)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_load_many_returns_grgs_in_input_order(missing_artifact, primary_artifact):
     """mikado zips chromosome labels against this list positionally."""
@@ -400,7 +400,7 @@ def test_load_many_returns_grgs_in_input_order(missing_artifact, primary_artifac
     assert [g.artifact_path for g in grgs] == paths
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_same_device_grgs_share_one_lock_and_runtime(missing_artifact, primary_artifact):
     from pygrgl_spmv import load_grg_spmv_multi
@@ -416,7 +416,7 @@ def test_same_device_grgs_share_one_lock_and_runtime(missing_artifact, primary_a
         assert grgs[0]._grg._runtime is grgs[1]._grg._runtime
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_release_drops_the_graphs_and_staging_buffers(missing_artifact):
     """The release hook used to set a bool and nothing else, so a retained handle
@@ -449,7 +449,7 @@ def test_release_drops_the_graphs_and_staging_buffers(missing_artifact):
         assert getattr(grg, name) == {}
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_up_only_missingness_allocates_no_miss_staging_buffer(missing_artifact, monkeypatch):
     """Sizing shared_miss from UP reserved k * num_mutations that nothing aliased."""
@@ -488,7 +488,7 @@ def test_up_only_missingness_allocates_no_miss_staging_buffer(missing_artifact, 
         assert miss.sum() > 0, "fixture has no missingness; the test would be vacuous"
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_captured_miss_with_emit_all_nodes_fails_like_the_eager_path(missing_artifact):
     """grapp forwards both flags, and strict _key would answer with a wrong exception
@@ -502,3 +502,53 @@ def test_captured_miss_with_emit_all_nodes_fails_like_the_eager_path(missing_art
         miss = np.zeros((1, grg.num_mutations), dtype=DATA_DTYPE)
         with pytest.raises(RuntimeError, match="cannot be mixed with"):
             grg.matmul(x, "up", miss=miss, emit_all_nodes=True)
+
+
+_INIT_VECTOR_RUNCONFIG = RunConfigs(
+    req=RuntimeRequirements(
+        max_k_up=2, max_k_down=2, need_down_miss_input=False, need_up_miss_output=True,
+        need_init_vector=True, need_init_matrix=False, need_init_xtx=False,
+    ),
+    capture_ops=(
+        CaptureSpec("up", 2, init_mode="vector"),
+        CaptureSpec("up", 2, use_miss=True),
+        CaptureSpec("up", 2),
+    ),
+)
+
+
+@pytest.mark.cuda13
+@pytest.mark.cusparse
+@pytest.mark.parametrize("payload", ["init", "miss"])
+def test_init_and_miss_must_share_the_inputs_dtype(primary_artifact, missing_artifact, payload):
+    """An int32 input with a float64 init used to be accepted and then truncated to the
+    int32 output, losing the init's fractional part with no signal -- verified as
+    [135 494 225 197] where float64 gives [135.5 494. 225.5 197.]. Both arrays are
+    validated against the *capture* dtype, which allows int32 wherever float64 is
+    expected, so neither check caught the mismatch between them. Eager has always
+    raised; these now agree, message included."""
+    artifact = missing_artifact if payload == "miss" else primary_artifact
+    with contextlib.ExitStack() as stack:
+        grg = load_grg_spmv_single(
+            artifact, make_backend_cusparse(device=0, capture=True), _INIT_VECTOR_RUNCONFIG, stack
+        )
+        int_x = np.ones((1, grg.num_samples), dtype=np.int32)
+        f64_x = np.ones((1, grg.num_samples), dtype=DATA_DTYPE)
+
+        def call(x, dtype):
+            arg = (
+                {"init": np.array([0.5], dtype=dtype)}
+                if payload == "init"
+                else {"miss": np.zeros((1, grg.num_mutations), dtype=dtype)}
+            )
+            return grg.matmul(x, "up", **arg)
+
+        for x, dtype in ((int_x, np.float64), (f64_x, np.int32)):
+            with pytest.raises(TypeError, match="must match the dtype of the input matrix"):
+                call(x, dtype)
+
+        # Matching dtypes still work, and an int32 input with no payload at all still
+        # returns int32 -- the one divergence from eager that is deliberate.
+        call(f64_x, np.float64)
+        call(int_x, np.int32)
+        assert grg.matmul(int_x, "up").dtype == np.int32

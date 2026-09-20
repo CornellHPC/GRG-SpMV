@@ -53,7 +53,7 @@ def pytest_collection_modifyitems(config, items):
         case "mkl":
             skip = pytest.mark.skip(reason="--backend=mkl")
             for item in items:
-                if "cusparse" in item.keywords or "gpu" in item.keywords:
+                if "cusparse" in item.keywords or "cuda13" in item.keywords:
                     item.add_marker(skip)
         case "cusparse":
             skip = pytest.mark.skip(reason="--backend=cusparse")

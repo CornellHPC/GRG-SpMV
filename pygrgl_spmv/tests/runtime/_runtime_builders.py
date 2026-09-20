@@ -145,7 +145,7 @@ def nonreference_backend_cases():
     """
     return (
         pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
-        pytest.param("cusparse", id="cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse]),
+        pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cuda13, pytest.mark.cusparse]),
     )
 
 

@@ -248,7 +248,7 @@ def test_auto_threads_warns_when_files_outnumber_cores(tmp_path):
         assert _resolve_mkl_threads(make_backend_mkl(n_threads=0), path, _physical_cores() + 1) == (1, 1)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_resolve_device_dict_form_and_errors(tmp_path):
     path = tmp_path / "chr1.grg_spmv"
@@ -290,7 +290,7 @@ def test_load_validates_its_arguments(primary_artifact, primary_grg_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 @pytest.mark.parametrize(
     "direction",
@@ -305,7 +305,7 @@ def test_captured_matmul_accepts_every_direction_form(primary_artifact, directio
         assert float(grg.matmul(ones, direction).sum()) > 0
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_captured_matmul_rejects_an_unknown_direction(primary_artifact):
     with testing.load(primary_artifact, backend="cusparse", capture=True,
@@ -327,13 +327,13 @@ def _expected_miss(grg_obj, k: int) -> np.ndarray:
 
 
 # Marks, not bare strings: the collection hook filters on item.keywords, so an
-# unmarked "cusparse" param initialised CUDA under --backend mkl and -m "not gpu".
+# unmarked "cusparse" param initialised CUDA under --backend mkl and -m "not cuda13".
 @pytest.mark.parametrize(
     "backend",
     [
         pytest.param("reference", id="reference"),
         pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
-        pytest.param("cusparse", id="cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse]),
+        pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cuda13, pytest.mark.cusparse]),
     ],
 )
 @pytest.mark.parametrize("k", [1, 2], ids=["k1", "k2"])
@@ -349,7 +349,7 @@ def test_up_miss_output_matches_pygrgl_on_every_backend(missing_artifact, missin
     np.testing.assert_allclose(got, expected, atol=1e-9)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 @pytest.mark.parametrize("k", [1, 2], ids=["k1", "k2"])
 def test_captured_copy_mode_accumulates_miss_into_the_callers_array(missing_artifact, missing_grg, k):
@@ -362,7 +362,7 @@ def test_captured_copy_mode_accumulates_miss_into_the_callers_array(missing_arti
     np.testing.assert_allclose(got, expected, atol=1e-9)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_native_mode_accumulates_miss_into_the_callers_device_array(missing_artifact, missing_grg):
     """Native mode updates a caller-OWNED device array in place, correctly.
@@ -387,7 +387,7 @@ def test_native_mode_accumulates_miss_into_the_callers_device_array(missing_arti
     assert got.sum() == pytest.approx(expected.sum())
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_native_mode_host_miss_message_warns_against_the_temporary(missing_artifact, missing_grg):
     """The old message read as an instruction to write the bug.
@@ -410,7 +410,7 @@ def test_native_mode_host_miss_message_warns_against_the_temporary(missing_artif
     assert "cupy.asarray()" in message
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_down_miss_input_matches_between_eager_and_captured(missing_artifact, missing_grg):
     runconfig = make_runconfig_bolt()

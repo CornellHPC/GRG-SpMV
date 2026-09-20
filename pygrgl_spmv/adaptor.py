@@ -1012,7 +1012,7 @@ def _available_cuda_devices() -> int:
         # Distinguish "no GPU extras installed" from "no GPU present"; the old code
         # swallowed this and reported the packaging error as a hardware error.
         raise ImportError(
-            "the cuSPARSE backend requires the GPU extras: pip install 'pygrgl-spmv[gpu]'"
+            "the cuSPARSE backend requires the CUDA extras: pip install 'pygrgl-spmv[cuda13]'"
         ) from exc
     except Exception as exc:
         # A cupy that imports but cannot initialise (runtime/driver mismatch) is not a
