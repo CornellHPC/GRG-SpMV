@@ -201,7 +201,15 @@ def test_compile_grg_loads_mutation_rows_only_after_blocks(monkeypatch):
 
 
 def test_compile_grg_rejects_empty_grgs():
-    with pytest.raises(ValueError, match="non-empty GRGs"):
+    """A sample-less GRG must be rejected, by us or by pygrgl.
+
+    pygrgl >= 2.10 refuses to construct MutableGRG(0, 1) at all
+    ("Must have at least one sample."), so compile_grg's own guard is no longer
+    reachable through this constructor. Accept either rejection: the contract
+    being protected is that a sample-less GRG never reaches the compiler, not
+    which layer says no.
+    """
+    with pytest.raises((ValueError, RuntimeError), match="(?i)non-empty GRGs|at least one sample"):
         compile_grg(pygrgl.MutableGRG(0, 1))
 
 

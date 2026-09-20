@@ -7,7 +7,7 @@ name = "pygrgl-spmv"
 version = "0.1.0"
 description = "Sparse matmul kernels for GRG-based genotype matrices"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [
     { name = "AprilWeiLab" },
@@ -15,7 +15,6 @@ authors = [
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -49,22 +48,17 @@ exclude = [
     "pygrgl_spmv/**/__pycache__/**",
 ]
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.hatch.build.targets.sdist]
 include = [
     "/pygrgl_spmv",
     "/pyproject.toml",
     "/README.md",
     "/LICENSE",
+    # README links into this; without it the sdist ships a dead link.
+    "/docs",
 ]
 exclude = [
     "/pygrgl_spmv/tests/**",
-    "/archived",
-    "/external",
-    "/figs",
-    "/text",
     "/scripts",
     "/dist",
     "/.venv",
@@ -84,5 +78,5 @@ markers = [
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 pythonPlatform = "x86_64-unknown-linux-gnu"

@@ -87,8 +87,10 @@ def test_stable_height_order_keeps_sample_prefix(primary_artifact):
         assert int(grg.level_offsets[1]) >= grg.num_samples
 
 
-def test_compiled_blocks_have_sorted_unique_columns(primary_grg_path):
-    grg = pygrgl.load_immutable_grg(primary_grg_path, load_up_edges=False)
+def test_compiled_blocks_have_sorted_unique_columns(any_grg):
+    # Runs on both fixtures: msprime is 2 levels with one non-empty block, so the
+    # per-(level, block) loops below are nearly vacuous on it.
+    grg = pygrgl.load_immutable_grg(any_grg.path, load_up_edges=False)
     state = compile_grg(grg)
     assert state.A_blocks is not None
     assert state.level_offsets.dtype == np.int32
@@ -113,8 +115,8 @@ def test_compiled_blocks_have_sorted_unique_columns(primary_grg_path):
                     assert np.all(row_indices[1:] > row_indices[:-1])
 
 
-def test_compiled_nonempty_blocks_share_read_only_bool_data(primary_grg_path):
-    grg = pygrgl.load_immutable_grg(primary_grg_path, load_up_edges=False)
+def test_compiled_nonempty_blocks_share_read_only_bool_data(any_grg):
+    grg = pygrgl.load_immutable_grg(any_grg.path, load_up_edges=False)
     state = compile_grg(grg)
     assert state.A_blocks is not None
     data_arrays = [block.data for level_blocks in state.A_blocks for block in level_blocks if block.nnz > 0]

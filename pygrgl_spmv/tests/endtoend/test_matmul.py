@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 
 import numpy as np
@@ -172,6 +173,11 @@ def test_init_failures(primary_grg_path, primary_artifact):
 
 
 def test_split_consistency(primary_grg, primary_grg_path, primary_artifact, tmp_path):
+    # Shells out to the `grg` CLI, which ships with pygrgl but is only on PATH when
+    # the venv's bin directory is (i.e. under `uv run`). Skip rather than fail, so a
+    # clean checkout is green however the suite is invoked.
+    if shutil.which("grg") is None:
+        pytest.skip("the `grg` CLI is not on PATH (run via `uv run pytest`)")
     with _open_reference_grg(primary_artifact, max_k=4) as grg:
         rows = 4
         rng = np.random.default_rng(777)

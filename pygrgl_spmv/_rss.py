@@ -1,4 +1,9 @@
-"""Small RSS checkpoint helper shared by compile and backend setup logs."""
+"""Small RSS checkpoint helper used by the compile and artifact-write paths.
+
+Linux-only (reads ``/proc/self/statm``) and degrades to a no-op elsewhere. Every
+checkpoint is gated on the logger being enabled for INFO, so it costs nothing in
+normal use.
+"""
 
 from __future__ import annotations
 
