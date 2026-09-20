@@ -37,7 +37,7 @@ The suite protects five things:
 - `test_bench_scripts.py`
   - Minimal benchmark runner loop counts and reporting contract.
 - `runtime/test_convert.py`
-  - `convert()` path/object behavior, artifact writing, init-bias persistence, and down-edge-only compilation.
+  - `simple_convert()` explicit-in/explicit-out contract: exact destination, suffix appending, parent creation, atomic overwrite, resolved return, rejected inputs/dtypes, validate-before-work (including both directory spellings and an unloadable GRG), the `python -m pygrgl_spmv convert` exit codes, byte reproducibility, and down-edge-only compilation.
 - `runtime/test_artifacts.py`
   - `.grg_spmv` scan/load/block iteration correctness and direct artifact consumption by runtimes.
 - `runtime/test_api.py`

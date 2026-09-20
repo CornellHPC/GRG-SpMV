@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import functools
 import logging
 import os
 from pathlib import Path
@@ -16,24 +15,12 @@ import numpy as np
 from pygrgl_spmv.grg.compile import CompiledOperatorState, _invert_permutation
 from pygrgl_spmv.grg.sparse import binary_csr_from_parts
 
+GRG_SPMV_SUFFIX = ".grg_spmv"
 GRG_SPMV_FORMAT_MAGIC = "grg_spmv"
 GRG_SPMV_FORMAT_VERSION = 8
 _FORMAT_MAGIC_KEY = "grg_spmv_magic"
 _FORMAT_VERSION_KEY = "grg_spmv_format_version"
 _LOGGER = logging.getLogger(__name__)
-
-
-def artifact_path_for_grg(grg_path: Path, artifact_root: Path) -> Path:
-    resolved = grg_path.expanduser().resolve()
-    if resolved.is_absolute():
-        if resolved.drive:
-            drive = resolved.drive.replace(":", "")
-            rel_parts = ["_drive_" + drive, *resolved.parts[1:]]
-        else:
-            rel_parts = ["_abs", *resolved.parts[1:]]
-    else:
-        rel_parts = ["_rel", *resolved.parts]
-    return artifact_root.joinpath(*rel_parts).with_suffix(".grg_spmv")
 
 
 @dataclass(frozen=True)
@@ -197,7 +184,6 @@ def save_grg_spmv(state: CompiledOperatorState, artifact_path) -> None:
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
-    _scan_grg_spmv_cached.cache_clear()
     _LOGGER.debug(
         "save_grg_spmv path=%s blocks=%d size=%.1fMB elapsed=%.3fs",
         path, num_blocks, path.stat().st_size / 1e6, time.perf_counter() - t0,
@@ -242,8 +228,7 @@ def _struct_dtype_from_itemsize(itemsize: int) -> np.dtype:
             raise ValueError(f"unsupported structural itemsize: {itemsize}")
 
 
-@functools.cache
-def _scan_grg_spmv_cached(artifact_path: Path) -> ArtifactScan:
+def _scan_grg_spmv(artifact_path: Path) -> ArtifactScan:
     t0 = time.perf_counter()
     with _open_archive(artifact_path) as data:
         _validate_archive(data, artifact_path)
@@ -339,8 +324,7 @@ def _scan_grg_spmv_cached(artifact_path: Path) -> ArtifactScan:
 
 
 def scan_grg_spmv(path) -> ArtifactScan:
-    artifact_path = Path(path).resolve()
-    return _scan_grg_spmv_cached(artifact_path)
+    return _scan_grg_spmv(Path(path).resolve())
 
 
 def iter_artifact_blocks(path):
@@ -501,6 +485,7 @@ __all__ = [
     "ArtifactBlockScan",
     "ArtifactScan",
     "GRG_SPMV_FORMAT_MAGIC",
+    "GRG_SPMV_SUFFIX",
     "GRG_SPMV_FORMAT_VERSION",
     "iter_artifact_blocks",
     "load_grg_spmv",

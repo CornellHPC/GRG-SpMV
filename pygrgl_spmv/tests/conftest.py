@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pygrgl
 import pytest
-from pygrgl_spmv import convert
+from pygrgl_spmv import simple_convert
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PRIMARY_GRG = str(REPO_ROOT / "pygrgl_spmv" / "tests" / "data" / "msprime.example.igd.final.grg")
@@ -171,19 +171,23 @@ def missing_grg(missing_grg_path):
 
 
 @pytest.fixture(scope="session")
-def artifact_cache_dir() -> Path:
-    path = REPO_ROOT / ".pytest_cache" / "runtime_artifacts"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def artifact_dir(tmp_path_factory) -> Path:
+    """Session-scoped directory for artifacts converted by the suite.
+
+    A fresh temp directory per session, deliberately: artifacts are inputs now,
+    not a cache, so every run converts exactly once and can never pick up a
+    stale artifact left by an older format version.
+    """
+    return tmp_path_factory.mktemp("grg_spmv_artifacts")
 
 
 @pytest.fixture(scope="session")
-def primary_artifact(primary_grg_path, artifact_cache_dir) -> Path:
-    return convert(primary_grg_path, artifact_cache_dir)
+def primary_artifact(primary_grg_path, artifact_dir) -> Path:
+    return simple_convert(primary_grg_path, artifact_dir / "primary.grg_spmv")
 
 
 @pytest.fixture(scope="session")
-def missing_artifact(missing_grg_path, artifact_cache_dir) -> Path:
-    return convert(missing_grg_path, artifact_cache_dir)
+def missing_artifact(missing_grg_path, artifact_dir) -> Path:
+    return simple_convert(missing_grg_path, artifact_dir / "missing.grg_spmv")
 
 
