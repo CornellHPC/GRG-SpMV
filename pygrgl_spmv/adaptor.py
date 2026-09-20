@@ -78,9 +78,31 @@ class CapturedBoundGRG:
             raise AttributeError(name)
         return getattr(self._grg, name)
 
-    def _key(self, direction, by_individual, init_mode="none", use_miss=False):
-        k = (direction, by_individual, init_mode, use_miss)
-        return k if k in self._src_tensors else (direction, by_individual, "none", False)
+    def _key(self, direction, by_individual, init_mode="none", use_miss=False, emit_all_nodes=False):
+        """Resolve the captured-graph key for this call, or fail loudly.
+
+        There is deliberately no fallback. The old one degraded a miss to
+        ``(direction, by_individual, "none", False)``, discarding BOTH init_mode
+        and use_miss -- and it could only ever fire when the caller had passed an
+        init or a miss, so it existed solely to throw them away. Measured on the
+        missingness fixture: an ``init="xtx"`` call returned the plain
+        allele-count answer, off by 400, with the first five values *identical*
+        because g**2 == g for 0/1 genotypes. A spot check passes.
+
+        Every miss is a run-configuration bug, so name both sides of it.
+        """
+        k = (direction, by_individual, init_mode, use_miss, emit_all_nodes)
+        if k in self._src_tensors:
+            return k
+        raise ValueError(
+            "CapturedBoundGRG.matmul(): no CUDA graph was captured for "
+            f"(direction={direction!r}, by_individual={by_individual!r}, "
+            f"init_mode={init_mode!r}, use_miss={use_miss!r}, "
+            f"emit_all_nodes={emit_all_nodes!r}). Captured keys: "
+            f"{sorted(self._src_tensors)}. Add a matching CaptureSpec to the "
+            "RunConfigs (plus the matching need_* flag on its "
+            "RuntimeRequirements), or load with capture=False."
+        )
 
     @staticmethod
     def _to_np_dtype(d):
@@ -99,11 +121,17 @@ class CapturedBoundGRG:
             return np.dtype(_map[d])
         return np.dtype(d)
 
-    def _validate_array(self, arr, *, name, role, expected_shape, expected_dtype, expected_device):
+    def _validate_array(self, arr, *, name, role, expected_shape, expected_dtype, expected_device,
+                        exact_k=False):
         """Validate one input array against expected shape/dtype/device.
 
         expected_device: torch.device (native mode) or None (copy mode → numpy).
         role: 'input' | 'init' | 'miss-in' | 'miss-out' (for error wording).
+        exact_k: when True, axis 0 must equal the expected k exactly. Only
+            ``input`` may be shorter than the captured k (it is zero-padded and
+            the output truncated back); an init or miss with fewer rows was
+            previously accepted and then silently broadcast by ``dst.copy_()``,
+            which the eager path rejects.
         """
         if arr is None:
             raise ValueError(f"matmul(): {name} ({role}) is required but got None")
@@ -148,18 +176,23 @@ class CapturedBoundGRG:
                 f"matmul(): {name} ({role}) dtype mismatch: expected {exp_np_dtype}, got {actual_np_dtype}"
             )
 
-        # Allow a smaller k (axis 0) than captured; 
-        # trailing dims (input_cols / num_nodes / num_mutations)
-        # must match exactly. Padding/truncation happens on axis 0.
+        # `input` may carry a smaller k than captured; the tail is zero-padded and
+        # the output truncated back. init/miss (exact_k=True) must match the
+        # input's k exactly. Trailing dims always match exactly.
+        # Rank first, so `or` short-circuits: a rank-0 array has no axis 0, and
+        # subscripting it raised IndexError where eager raises ValueError. k == 0
+        # would replay the full-width graph and return a silently empty answer.
         actual_shape = tuple(arr.shape)
         exp_shape = tuple(expected_shape)
         if (
             len(actual_shape) != len(exp_shape)
-            or actual_shape[0] > exp_shape[0]
+            or not 1 <= actual_shape[0] <= exp_shape[0]
+            or (exact_k and actual_shape[0] != exp_shape[0])
             or actual_shape[1:] != exp_shape[1:]
         ):
             raise ValueError(
-                f"matmul(): {name} ({role}) shape mismatch: expected k <= {exp_shape[0]} "
+                f"matmul(): {name} ({role}) shape mismatch: expected k "
+                f"{f'== {exp_shape[0]}' if exact_k else f'in 1..{exp_shape[0]}'} "
                 f"with trailing dims {exp_shape[1:]}, got {actual_shape}"
             )
 
@@ -192,9 +225,11 @@ class CapturedBoundGRG:
             padded up to the captured ``k`` before the graph replays and the output
             is truncated back, so ``result`` has the caller's ``k``. ``init``/``miss``
             (if used) must use the SAME ``k`` as ``input``.
-            Exception: when the capture dtype is float64, int32 input/init/miss
-            arrays are also accepted; they are cast to float64 before the kernel
-            runs and the returned ``result`` is cast back to int32.
+            Exception: when the capture dtype is float64, an int32 ``input`` is also
+            accepted; it is cast to float64 before the kernel runs and the returned
+            ``result`` is cast back to int32. ``init`` and ``miss`` must then be
+            int32 too -- like the eager path, they must share ``input``'s dtype,
+            since mixing them truncates one side against the other.
         direction : {"up", "down"}
         init : None | "xtx" | 1-D array | 2-D array
             Initialization payload; must match the init_mode of the captured spec
@@ -250,8 +285,7 @@ class CapturedBoundGRG:
             Array shape mismatch, or required ``init``/``miss`` missing for the
             captured key.
         """
-        assert emit_all_nodes is False, "emit_all_nodes=True is not supported for CapturedBoundGRG.matmul()"
-        #TODO: support emit all nodes
+        emit_all_nodes = bool(emit_all_nodes)
 
         with self._device_lock:
             # Inside the lock: _invalidate() takes the same one, which is what makes
@@ -276,10 +310,19 @@ class CapturedBoundGRG:
             else:
                 init_mode, init_payload = "matrix", init
             use_miss = miss is not None
+            # Both mirror BoundGRG.matmul, exception type included. Left to _key they
+            # report a missing graph and advise a CaptureSpec that the loader then
+            # refuses to build as "mutually exclusive".
+            if use_miss and emit_all_nodes:
+                raise RuntimeError(
+                    'the "miss" parameter cannot be mixed with the "emit_all_nodes" parameter'
+                )
+            if use_miss and init is not None:
+                raise ValueError('the "miss" parameter cannot be mixed with the "init" parameter')
 
             import torch
             nvtx = torch.cuda.nvtx
-            key = self._key(direction, by_individual, init_mode, use_miss)
+            key = self._key(direction, by_individual, init_mode, use_miss, emit_all_nodes)
             src = self._src_tensors[key]
 
             expected_dtype = src.dtype
@@ -298,6 +341,24 @@ class CapturedBoundGRG:
                 expected_dtype=expected_dtype,
                 expected_device=expected_device,
             )
+            # init and miss must share the input's dtype, as on the eager path. Both are
+            # validated independently against the *capture* dtype, which accepts int32
+            # wherever float64 is expected -- so an int32 input with a float64 init was
+            # accepted and then truncated to the int32 output, losing the init's
+            # fractional part silently. Same exception and wording as BoundGRG.matmul.
+            in_dtype = self._to_np_dtype(input.dtype)
+            if init_payload is not None:
+                init_dtype = self._to_np_dtype(init_payload.dtype)
+                if init_dtype != in_dtype:
+                    raise TypeError(
+                        f"the init matrix must match the dtype of the input matrix. Got: {init_dtype}"
+                    )
+            if use_miss:
+                miss_dtype = self._to_np_dtype(miss.dtype)
+                if miss_dtype != in_dtype:
+                    raise TypeError(
+                        f'the "miss" input must match the dtype of the input matrix. Got: {miss_dtype}'
+                    )
             # k may be smaller than captured; derive the caller's k (axis 0) from
             # the input and require init/miss to use the SAME k. A smaller k is
             # zero-padded up to k_full before replay and the output is truncated
@@ -312,14 +373,14 @@ class CapturedBoundGRG:
 
             if key in self._init_tensors:
                 self._validate_array(
-                    init_payload, name="init", role="init",
+                    init_payload, name="init", role="init", exact_k=True,
                     expected_shape=_expect(self._init_tensors[key].shape),
                     expected_dtype=expected_dtype,
                     expected_device=expected_device,
                 )
             if key in self._miss_tensors:
                 self._validate_array(
-                    miss, name="miss", role="miss-in",
+                    miss, name="miss", role="miss-in", exact_k=True,
                     expected_shape=_expect(self._miss_tensors[key].shape),
                     expected_dtype=expected_dtype,
                     expected_device=expected_device,
@@ -327,7 +388,7 @@ class CapturedBoundGRG:
             elif use_miss:
                 op_miss_out = self._prepared_ops[key].miss_output
                 self._validate_array(
-                    miss, name="miss", role="miss-out",
+                    miss, name="miss", role="miss-out", exact_k=True,
                     expected_shape=_expect(op_miss_out.shape),
                     expected_dtype=expected_dtype,
                     expected_device=expected_device,
@@ -461,6 +522,7 @@ class CaptureSpec:
     by_individual: bool = False
     init_mode: str = "none"   # "none" | "vector" | "matrix" | "xtx"
     use_miss: bool = False
+    emit_all_nodes: bool = False
 
 
 @dataclass(frozen=True)
@@ -590,11 +652,10 @@ def make_runconfig_kernel(direction, k, force_spmm=False) -> RunConfigs:
     )
 
 def make_runconfig_pca(force_spmm=False, maxk=1, **kwargs) -> RunConfigs:
-    """Create a RunConfigs for a PCA workload (init_vector enabled).
+    """Create a RunConfigs for a PCA workload.
 
-    Captures the graph variants used by PCA:
-      up by_individual=False (allele_counts single pass), and up/down
-      by_individual=True (individual eigsh blocks).
+    Captures the variants PCA drives: allele_counts on UP, and both directions
+    for by_individual in {True, False} (False is the haploid case).
 
     force_spmm: when False (default) graphs are captured at k=1 (SpMV path);
         when True they are captured at k=2 (SpMM path). Captures at k=2 still
@@ -612,7 +673,12 @@ def make_runconfig_pca(force_spmm=False, maxk=1, **kwargs) -> RunConfigs:
             max_k_down=k,
             need_down_miss_input=False,
             need_up_miss_output=True,
-            need_init_vector=True,
+            # No PCA path passes an array init: init="xtx" is the only non-None
+            # init value anywhere in grapp, and get_eig_pcs(init_vector=...) is
+            # eigsh's v0, not a matmul init. Declaring it cost num_nodes *
+            # itemsize of planner metadata that nothing ever read -- O(graph
+            # size), so hundreds of MB at biobank scale.
+            need_init_vector=False,
             need_init_matrix=False,
             need_init_xtx=False,
         ),
@@ -622,8 +688,13 @@ def make_runconfig_pca(force_spmm=False, maxk=1, **kwargs) -> RunConfigs:
             CaptureSpec("up",   k, by_individual=False, use_miss=True),     # But missing for 1 grg
             CaptureSpec("up",   k, by_individual=True),
             CaptureSpec("down", k, by_individual=True),
+            # grapp's operators use by_individual = not haploid, and eigsh drives
+            # both _matmat and _rmatmat, so haploid=True needs this pair in both
+            # directions. Free: max_k_down already sizes the buffers.
+            CaptureSpec("down", k, by_individual=False),
         ),
     )
+
 
 def make_runconfig_bolt(force_spmm=False, **kwargs) -> RunConfigs:
     """Create a RunConfigs for a BoltLMM workload (init_xtx + miss enabled).
@@ -654,6 +725,12 @@ def make_runconfig_bolt(force_spmm=False, **kwargs) -> RunConfigs:
             # all others
             CaptureSpec("up",   k, by_individual=True),
             CaptureSpec("up",   k, by_individual=True, init_mode="xtx"),
+            # grapp's diag(X^T X) call sites (util/simple.py::variance and
+            # assoc::_computeDiagXTX) use the by_individual=False default. Without
+            # this spec the old _key fallback silently returned plain allele
+            # counts instead -- off by 400 on the missingness fixture, with the
+            # leading values identical. Free: 0 extra device bytes.
+            CaptureSpec("up",   k, by_individual=False, init_mode="xtx"),
             CaptureSpec("down", k, by_individual=True),
             CaptureSpec("up",   k, by_individual=True, use_miss=True),
             CaptureSpec("down", k, by_individual=True, use_miss=True),
@@ -684,6 +761,10 @@ def make_runconfig_gwas(force_spmm=False, maxk=1, sample_variance=True, **kwargs
 
     capture_ops = [
         CaptureSpec("up", k, by_individual=False, use_miss=True),   # allele_counts
+        # allele_counts(return_missing=False) / allele_frequencies(adjust_missing=False).
+        # This is also exactly the key the old _key fallback substituted, so
+        # without it those two public grapp calls died on a bare KeyError.
+        CaptureSpec("up", k, by_individual=False, use_miss=False),
         CaptureSpec("up", k, by_individual=True,  use_miss=False),  # X-op: standardized / no-missing
         CaptureSpec("up", k, by_individual=True,  use_miss=True),   # X-op: non-standardized + missing
     ]
@@ -907,7 +988,7 @@ def _capture_grg(grg, capture_stream, req, cfg, stack, device_lock=None) -> Capt
 
     for spec in ops_to_capture:
         _validate_capture_spec(spec, bare_req)
-        key = (spec.direction, spec.by_individual, spec.init_mode, spec.use_miss)
+        key = (spec.direction, spec.by_individual, spec.init_mode, spec.use_miss, spec.emit_all_nodes)
         if key in prepared_ops:
             raise ValueError(f"Duplicate CaptureSpec key {key!r} in capture_ops")
         op = stack.enter_context(
@@ -917,6 +998,7 @@ def _capture_grg(grg, capture_stream, req, cfg, stack, device_lock=None) -> Capt
                 by_individual=spec.by_individual,
                 init_mode=spec.init_mode,
                 use_miss=spec.use_miss,
+                emit_all_nodes=spec.emit_all_nodes,
             )
         )
         prepared_ops[key] = op
@@ -925,9 +1007,10 @@ def _capture_grg(grg, capture_stream, req, cfg, stack, device_lock=None) -> Capt
             op.init_vector.numel() if spec.init_mode == "vector" else
             op.init_matrix.numel() if spec.init_mode == "matrix" else 0
         )
+        # UP's miss_output is written by the kernel, never staged, so counting it
+        # reserved k * num_mutations that nothing aliased -- GBs on pca and gwas.
         miss_numels.append(
-            op.miss_input.numel()  if (spec.use_miss and spec.direction == "down") else
-            op.miss_output.numel() if (spec.use_miss and spec.direction == "up")   else 0
+            op.miss_input.numel() if (spec.use_miss and spec.direction == "down") else 0
         )
 
     # ---- Phase 2: allocate shared staging buffers ----
@@ -944,14 +1027,23 @@ def _capture_grg(grg, capture_stream, req, cfg, stack, device_lock=None) -> Capt
     init_tensors: dict = {}
     miss_tensors: dict = {}
 
-    for i, spec in enumerate(ops_to_capture):
-        key = (spec.direction, spec.by_individual, spec.init_mode, spec.use_miss)
+    for spec in ops_to_capture:
+        key = (spec.direction, spec.by_individual, spec.init_mode, spec.use_miss, spec.emit_all_nodes)
         op  = prepared_ops[key]
         k, input_cols = op.input.shape  # op.input is (k, input_cols), column-major
 
-        # Alias a column-major view of shared_src that matches op.input's layout.
-        # op.input is _io0_torch[:input_cols, :k].T, so strides are (1, k).
+        # Deliberately does not match op.input's strides (_io0 is order="C" with
+        # max_k_any columns), and need not: copy_ handles differing layouts. Making
+        # them match would run this view off the end of shared_src.
         src = torch.as_strided(shared_src, size=(k, input_cols), stride=(1, k))
+
+        # An op's first call allocates cuSPARSE workspace and touches lazy
+        # descriptors; doing that inside torch.cuda.graph poisons the shared capture
+        # stream, so one bad spec failed every other graph in the RunConfigs.
+        # torch.cuda.graph synchronizes before capture_begin, so no stream juggling
+        # is needed here. ~5 ms per spec.
+        op()
+
         graph = torch.cuda.CUDAGraph()
 
         if spec.init_mode == "vector":

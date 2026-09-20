@@ -18,13 +18,15 @@ Streamed GPU tests skip only for insufficient host RAM while constructing the sy
 
 ## Shared Contracts
 
-The suite protects five things:
+The suite protects seven things:
 
 - compile and artifact correctness
 - `BoundGRG` host-side API semantics
 - planner byte/layout correctness
 - entered-runtime ownership and lifecycle invariants
 - backend numerical parity and end-to-end explicit-matrix equivalence
+- adaptor run-configuration and capture-key correctness
+- the shipped `pygrgl_spmv.testing` public contract
 
 ## File Map
 
@@ -36,6 +38,8 @@ The suite protects five things:
   - CPU-safe package import surface under blocked optional GPU modules.
 - `test_bench_scripts.py`
   - Minimal benchmark runner loop counts and reporting contract.
+- `runtime/test_adaptor_capture.py`
+  - Capture-key correctness for the adaptor's CUDA-graph path: CPU-only snapshots of every `make_runconfig_*` capture set and `need_*` flag (self-consistency, uniqueness, no unused flag), plus GPU parity of every captured key against the eager path, loud failure on an uncaptured key, exact-k rejection of short init/miss, pad/truncate for short input, `emit_all_nodes`, and multi-artifact load ordering.
 - `runtime/test_testing_helpers.py`
   - Contract for the shipped `pygrgl_spmv.testing` helpers: no `test_`-prefixed public name (pytest would collect it in the consumer's suite), importable with pytest blocked, fork-safe availability probes that leave the CUDA driver uninitialised, context-manager lifetimes with no caller-supplied `ExitStack`, the post-release replay guard, and the strict per-backend keyword allowlist.
 - `runtime/test_convert.py`
