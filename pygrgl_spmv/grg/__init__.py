@@ -14,7 +14,7 @@ import pygrgl
 
 from pygrgl_spmv._rss import rss_checkpoint
 from pygrgl_spmv.backends.types import Direction, InitMode, parse_direction, parse_init_mode
-from pygrgl_spmv.grg.artifact import _load_grg_spmv_host, artifact_path_for_grg, save_grg_spmv
+from pygrgl_spmv.grg.artifact import GRG_SPMV_SUFFIX, save_grg_spmv
 from pygrgl_spmv.grg.compile import CompiledOperatorState, compile_grg
 
 if TYPE_CHECKING:
@@ -734,57 +734,76 @@ class BoundGRG:
             return self._finish_endpoint_output(result_internal)
 
 
-def convert(
-    source: str | os.PathLike[str] | pygrgl.ImmutableGRG,
-    output_dir: str | os.PathLike[str] = "pygrgl_spmv_artifacts",
+_CONVERT_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
+
+
+def simple_convert(
+    input_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str],
     *,
     dtype=np.float64,
-    name: str | None = None,
 ) -> Path:
-    """Compile a GRG and write a `.grg_spmv` artifact.
+    """Compile a ``.grg`` file into a ``.grg_spmv`` artifact at an exact path.
 
-    Path-based sources default to an artifact path derived from the fully
-    resolved source path under ``output_dir``. Passing ``name=`` overrides that
-    default and writes ``output_dir / f"{name}.grg_spmv"`` instead.
+    This is the only way to produce a ``.grg_spmv`` artifact, and it is a
+    mandatory, separate step: nothing in ``pygrgl-spmv`` converts implicitly, so
+    conversion time is never counted as GRG-SpMV runtime.
+
+    ``output_path`` names the artifact file itself, not a directory. The
+    ``.grg_spmv`` suffix is appended when absent, and parent directories are
+    created as needed. An existing artifact at that path is overwritten
+    atomically.
+
+    Returns the resolved path that was written.
     """
+    src = Path(os.fspath(input_path)).expanduser()
+    dst = Path(os.fspath(output_path)).expanduser()
+    # Path() normalises a trailing slash away, so "artifacts/" would become the
+    # sibling *file* artifacts.grg_spmv. A Path argument cannot be caught this way:
+    # Path("a/") is already Path("a"), leaving only the is_dir() checks below.
+    trailing_slash = os.fspath(output_path).endswith(("/", os.sep))
 
+    # Validate everything before loading the GRG, so a bad call costs no time
+    # rather than failing after a full compile.
+    if src.suffix != ".grg":
+        raise ValueError(f"expected a .grg input file, got {src}")
+    if not src.is_file():
+        raise FileNotFoundError(f"GRG input file not found: {src}")
+    as_given = dst
+    empty_name = dst.name == ""  # "." and "/", which with_name() cannot suffix
+    if not empty_name and dst.suffix != GRG_SPMV_SUFFIX:
+        dst = dst.with_name(dst.name + GRG_SPMV_SUFFIX)
+    # Both spellings: only as_given used to be checked, so "out/foo" where
+    # out/foo.grg_spmv is a directory failed inside save_grg_spmv, post-compile.
+    if trailing_slash or empty_name or as_given.is_dir() or dst.is_dir():
+        raise IsADirectoryError(
+            f"output_path must name a .grg_spmv file, not a directory, got {os.fspath(output_path)!r}; "
+            "simple_convert() writes one artifact to an exact path"
+        )
     dtype = np.dtype(dtype)
-    if output_dir is None:
-        raise ValueError("convert() requires an output_dir in the runtime-owned API")
+    if dtype not in _CONVERT_DTYPES:
+        raise ValueError(f"dtype must be float32 or float64, got {dtype}")
+    # Redundant with save_grg_spmv(), but here a bad parent costs nothing.
+    dst.parent.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(source, (str, os.PathLike)):
-        source_path = Path(os.fspath(source))
-        if source_path.suffix != ".grg":
-            raise ValueError(f"expected a .grg file, got {source_path}")
-        stem = source_path.stem if name is None else str(name)
-        grg = pygrgl.load_immutable_grg(str(source_path), load_up_edges=False)
-        prev_rss = rss_checkpoint(_COMPILE_LOGGER, "artifact:grg_loaded", None)
-        own_grg = True
-    else:
-        if name is None:
-            raise ValueError("name is required when source is an ImmutableGRG object")
-        stem = str(name)
-        grg = source
-        prev_rss = None
-        own_grg = False
-
+    grg = pygrgl.load_immutable_grg(str(src), load_up_edges=False)
+    if grg is None:
+        # pygrgl returns None rather than raising, so without this a corrupt .grg
+        # reaches compile_grg() and dies as an AttributeError on NoneType.
+        raise ValueError(f"could not load GRG (see stderr for the reason): {src}")
+    prev_rss = rss_checkpoint(_COMPILE_LOGGER, "artifact:grg_loaded", None)
     compiled = compile_grg(grg)
     prev_rss = rss_checkpoint(_COMPILE_LOGGER, "artifact:compiled", prev_rss)
-    if own_grg:
-        del grg
-        prev_rss = rss_checkpoint(_COMPILE_LOGGER, "artifact:grg_dropped", prev_rss)
+    del grg
+    prev_rss = rss_checkpoint(_COMPILE_LOGGER, "artifact:grg_dropped", prev_rss)
     _build_init_biases(compiled, dtype)
     prev_rss = rss_checkpoint(_COMPILE_LOGGER, "artifact:init_biases", prev_rss)
 
-    out_dir = Path(output_dir).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if isinstance(source, (str, os.PathLike)) and name is None:
-        artifact_path = artifact_path_for_grg(source_path, out_dir)
-    else:
-        artifact_path = out_dir / f"{stem}.grg_spmv"
-    save_grg_spmv(compiled, artifact_path)
+    save_grg_spmv(compiled, dst)
     rss_checkpoint(_COMPILE_LOGGER, "artifact:saved", prev_rss)
-    return artifact_path
+    # scan_grg_spmv() resolves its path while BoundGRG.artifact_path does not;
+    # returning a resolved path keeps the two identities equal by construction.
+    return dst.resolve()
 
 
-__all__ = ["BoundGRG", "RuntimeRequirements", "convert"]
+__all__ = ["BoundGRG", "RuntimeRequirements", "simple_convert"]

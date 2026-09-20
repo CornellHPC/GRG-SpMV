@@ -4,7 +4,7 @@ Parent docs: [Project README](../../README.md)
 
 `pygrgl_spmv/grg/` contains:
 
-- `convert(...) -> Path`
+- `simple_convert(input_path, output_path, *, dtype=float64) -> Path` — the only way to produce an artifact
 - the `.grg_spmv` save/load/scan helpers in [artifact.py](artifact.py)
 - the compile pipeline in [compile.py](compile.py)
 - the internal `BoundGRG` host-side API logic in [__init__.py](__init__.py)

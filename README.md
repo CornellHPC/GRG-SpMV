@@ -32,13 +32,22 @@ To use `pygrgl-spmv` with `grapp` and the supported applications (GWAS, PCA, BOL
 
 To obtain a `.grg` file from formats such as `.vcf.gz`, please refer to the [grgl docs](https://grgl.readthedocs.io/en/stable/) for instructions.
 
-Currently, the `.grg` file needs to go through a simple conversion step to generate a `.grg_spmv` artifact, which is the format that `pygrgl-spmv` can consume. This can be done using the `simple_convert` function. An example: 
+`pygrgl-spmv` consumes `.grg_spmv` artifacts only. Converting a `.grg` file into one is a **mandatory, separate step** — nothing in the library converts implicitly, so conversion time is never counted as GRG-SpMV runtime. Use `simple_convert`, which names both the input and the output file:
 
 ```python
 from pygrgl_spmv import simple_convert
 
 artifact = simple_convert("chr1.grg", "artifacts/chr1.grg_spmv")
 ```
+
+Or from the command line, which also reports how long the conversion took:
+
+```bash
+python -m pygrgl_spmv convert chr1.grg artifacts/chr1.grg_spmv
+# artifacts/chr1.grg_spmv  (1.5 MB, 0.55s)
+```
+
+`output_path` names the artifact file, not a directory; the `.grg_spmv` suffix is appended if absent, parent directories are created, and an existing artifact at that path is replaced atomically. `dtype` (`float32` or `float64`, default `float64`) sets the precision of the precomputed init-bias arrays baked into the artifact. Multi-processing can speed up conversion of several datasets.
 
 ### Running
 
@@ -123,10 +132,10 @@ An example and notes have been provided below.
 ```python
 import numpy as np
 
-from pygrgl_spmv import RuntimeRequirements, convert
+from pygrgl_spmv import RuntimeRequirements, simple_convert
 from pygrgl_spmv.backends.cusparse import CusparsePlanPair, CusparseRuntime, plan_cusparse_layout
 
-artifact = convert("A.grg", "artifacts")
+artifact = simple_convert("A.grg", "artifacts/A.grg_spmv")
 req = RuntimeRequirements(
     max_k_up=8,
     max_k_down=8,
@@ -162,7 +171,7 @@ with CusparseRuntime(layout) as runtime:
 ### Public surface
 
 - Package root exports:
-  - `convert(...) -> Path`
+  - `simple_convert(grg_path, artifact_path, *, dtype=float64) -> Path`
   - `RuntimeRequirements`
   - `plan_reference_layout(...)`, `ReferenceRuntime`
   - `plan_mkl_layout(...)`, `MklRuntime`

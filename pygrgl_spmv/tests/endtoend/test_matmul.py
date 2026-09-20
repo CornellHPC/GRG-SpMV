@@ -215,11 +215,10 @@ def test_split_consistency(primary_grg, primary_grg_path, primary_artifact, tmp_
     for _bp_start, fn, num_muts in part_infos:
         end = start + num_muts
         sub_matrix = in_matrix[:, start:end]
-        part_artifact = fn.with_suffix(".grg_spmv")
-        from pygrgl_spmv import convert
+        from pygrgl_spmv import simple_convert
 
-        convert(str(fn), part_artifact.parent, name=part_artifact.stem)
-        with _open_reference_grg(part_artifact.parent / f"{part_artifact.stem}.grg_spmv", max_k=4) as part_grg:
+        part_artifact = simple_convert(fn, fn.with_suffix(".grg_spmv"))
+        with _open_reference_grg(part_artifact, max_k=4) as part_grg:
             part_out = part_grg.matmul(sub_matrix, pygrgl.TraversalDirection.DOWN)
         split_result = part_out.copy() if split_result is None else (split_result + part_out)
         start = end

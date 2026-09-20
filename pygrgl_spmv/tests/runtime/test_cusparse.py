@@ -666,9 +666,9 @@ def gpu_small_stream_case():
 
 
 @pytest.fixture(scope="module")
-def cusparse_small_stream_artifact(artifact_cache_dir, gpu_small_stream_case):
+def cusparse_small_stream_artifact(artifact_dir, gpu_small_stream_case):
     return write_three_level_band_artifact(
-        artifact_cache_dir,
+        artifact_dir,
         f"gpu-small-stream-n{gpu_small_stream_case.n}",
         n=gpu_small_stream_case.n,
         bandwidth=gpu_small_stream_case.bandwidth,
@@ -677,9 +677,9 @@ def cusparse_small_stream_artifact(artifact_cache_dir, gpu_small_stream_case):
 
 
 @pytest.fixture(scope="module")
-def cusparse_stream_stress_artifact(artifact_cache_dir, cusparse_stream_stress_case):
+def cusparse_stream_stress_artifact(artifact_dir, cusparse_stream_stress_case):
     return write_three_level_band_artifact(
-        artifact_cache_dir,
+        artifact_dir,
         f"gpu-stream-stress-n{cusparse_stream_stress_case.n}",
         n=cusparse_stream_stress_case.n,
         bandwidth=cusparse_stream_stress_case.bandwidth,

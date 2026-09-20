@@ -237,7 +237,6 @@ def test_scan_uses_direct_metadata_without_loading_block_or_selector_arrays(tmp_
             raise AssertionError(f"scan loaded structural array {key}")
         return real_load_struct_array(data, key, non_negative=non_negative)
 
-    artifact_module._scan_grg_spmv_cached.cache_clear()
     monkeypatch.setattr(artifact_module, "_load_struct_array", _guarded_load_struct_array)
 
     scan = scan_grg_spmv(artifact)

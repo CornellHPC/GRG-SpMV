@@ -2,7 +2,7 @@
 
 from pygrgl_spmv.backends.mkl import MklPlan, MklPlanPair, MklRuntime, plan_mkl_layout
 from pygrgl_spmv.backends.reference import ReferencePlan, ReferencePlanPair, ReferenceRuntime, plan_reference_layout
-from pygrgl_spmv.grg import RuntimeRequirements, convert
+from pygrgl_spmv.grg import RuntimeRequirements, simple_convert
 from pygrgl_spmv.adaptor import (
     CapturedBoundGRG,
     CaptureSpec,
@@ -17,7 +17,6 @@ from pygrgl_spmv.adaptor import (
     make_runconfig_gwas,
     load_grg_spmv_single,
     load_grg_spmv_multi,
-    simple_convert,
 )
 
 __all__ = [
@@ -28,7 +27,7 @@ __all__ = [
     "ReferencePlanPair",
     "ReferenceRuntime",
     "RuntimeRequirements",
-    "convert",
+    "simple_convert",
     "plan_mkl_layout",
     "plan_reference_layout",
     "CapturedBoundGRG",
@@ -44,5 +43,4 @@ __all__ = [
     "make_runconfig_gwas",
     "load_grg_spmv_single",
     "load_grg_spmv_multi",
-    "simple_convert",
 ]

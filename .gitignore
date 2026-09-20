@@ -259,7 +259,10 @@ archived/
 external/
 text/
 figs/
-*.pygrgl_spmv.npz
+# Compiled artifacts. `artifacts/` is the directory the README's convert examples
+# write into, so without it `git add -A` from a fresh checkout stages multi-GB files.
+*.grg_spmv
+artifacts/
 investigation/
 notes.txt
 output*.txt
