@@ -679,7 +679,6 @@ def _query_spmm_buffer_sizes(
                 else:
                     query_blocks = artifact_layout.blocks_down
                     transpose_sparse = False
-                op_index_by_level = [0 for _ in range(scan.num_levels)]
                 for block in query_blocks:
                     if direction == Direction.UP:
                         dst_level = int(block.dst_level)
@@ -694,8 +693,6 @@ def _query_spmm_buffer_sizes(
                         cuda_dtype_id=cuda_dtype_id,
                     )
                     try:
-                        op_idx = op_index_by_level[dst_level]
-                        op_index_by_level[dst_level] += 1
                         if scratch_enabled[dst_level]:
                             scratch = cp.zeros((level_sizes[dst_level], max_k), dtype=dtype, order=_dense_order_char(plan.order_c))
                             dst_desc = _create_dense_desc(cslib=cslib, buf=scratch, order=plan.order_c, cuda_dtype_id=cuda_dtype_id)
@@ -703,7 +700,18 @@ def _query_spmm_buffer_sizes(
                                 size = cslib.spmm_buffer_size(int(plan.algo), int(plan.op_a), int(plan.op_b), alpha.data.ptr, sp_desc, src_descs[src_level], beta_zero.data.ptr, dst_desc, cuda_dtype_id)
                             finally:
                                 cslib.destroy_dn_mat(dst_desc)
-                            ext_scratch[dst_level][op_idx] = max(int(ext_scratch[dst_level][op_idx]), int(size))
+                            # Size every scratch slot at this level to the level-wide max,
+                            # exactly as ext_main does. This walk visits blocks in artifact
+                            # order (ascending parent level), while the runtime assigns
+                            # op_idx via iter_direction_level_pairs -- which for DOWN is the
+                            # exact reverse. A per-slot size would therefore be handed to a
+                            # different op at replay time than the one it was measured for,
+                            # and cuSPARSE would write past the end of the buffer. Keeping
+                            # this per-level makes the two functions order-independent.
+                            row = ext_scratch[dst_level]
+                            level_max = max([int(size), *(int(v) for v in row)])
+                            for slot in range(len(row)):
+                                row[slot] = level_max
                         else:
                             size = cslib.spmm_buffer_size(int(plan.algo), int(plan.op_a), int(plan.op_b), alpha.data.ptr, sp_desc, src_descs[src_level], beta_one.data.ptr, dst_descs[dst_level], cuda_dtype_id)
                             ext_main[dst_level] = max(int(ext_main[dst_level]), int(size))

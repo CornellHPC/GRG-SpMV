@@ -52,6 +52,8 @@ The suite protects five things:
   - Reference traversal correctness, stable node ordering, exact binary cases, dtype coverage, and zero/stability behavior.
 - `runtime/test_reference.py`
   - Reference runtime parity and exact byte accounting for resident sparse blocks, selectors, and workspaces.
+- `runtime/test_mkl_lifecycle.py`
+  - `MklRuntime.__enter__` failure-path ownership under a stubbed MKL FFI: a failure part way through one artifact's block loop must still destroy every handle built so far, before the shared values buffer is munmapped. Carries no `mkl` marker on purpose, so it runs on hosts without `libmkl_rt.so`.
 - `runtime/test_mkl.py`
   - MKL runtime parity, format/thread-local behavior, separate-runtime threaded execution, LP64 ABI checks, `float32` dispatch, shared-value budgeting, and optimize-flag semantics.
 - `runtime/test_plans.py`

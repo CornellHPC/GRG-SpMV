@@ -225,12 +225,21 @@ _ct_int = None
 
 
 def _ensure_loaded():
+    """Load libmkl_rt, detect its integer width, and bind signatures. Cached.
+
+    All-or-nothing, so a failed ABI probe leaves every global None and the next call
+    retries. A half-initialised state hands out (lib, None, None), and
+    np.dtype(None).itemsize is 8, which silently doubles _plan_blocks' accounting.
+    """
     global _mkl_lib, _mkl_int_dtype, _ct_int
     if _mkl_lib is None:
-        _mkl_lib = _load_mkl()
-        _mkl_int_dtype = _detect_mkl_int(_mkl_lib)
-        _ct_int = ctypes.c_int if _mkl_int_dtype == np.dtype(np.int32) else ctypes.c_long
-        _setup_mkl_signatures(_mkl_lib, _ct_int)
+        lib = _load_mkl()
+        int_dtype = _detect_mkl_int(lib)
+        ct_int = ctypes.c_int if int_dtype == np.dtype(np.int32) else ctypes.c_long
+        _setup_mkl_signatures(lib, ct_int)
+        # _mkl_lib last: it is the guard above, and tuple assignment stores left to
+        # right, so publishing it first exposes a still-None dtype.
+        _mkl_int_dtype, _ct_int, _mkl_lib = int_dtype, ct_int, lib
     return _mkl_lib, _mkl_int_dtype, _ct_int
 
 

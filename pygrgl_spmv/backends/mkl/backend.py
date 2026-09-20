@@ -345,11 +345,18 @@ class MklRuntime:
         with _mkl_local_threads(setup_threads):
             self._shared_values = self._materialize_shared_values()
             artifacts: list[_MklArtifact] = []
+            # Grids for the artifact currently being built. An _MklArtifact is appended
+            # to `artifacts` only after its whole block loop finishes, so a failure part
+            # way through the loop would otherwise hide every handle built so far from
+            # _destroy_handles -- and the _shared_values.destroy() below then munmaps the
+            # values buffer those still-live handles point into.
+            pending_grids: list[list] = []
             try:
                 for artifact_layout, state in zip(self.layout.artifacts, states, strict=True):
                     h = len(state.level_offsets) - 1
                     up_grid = [[None] * dst_level for dst_level in range(h)]
                     down_grid = [[None] * dst_level for dst_level in range(h)]
+                    pending_grids = [up_grid, down_grid]
                     for block in iter_artifact_blocks(artifact_layout.path):
                         base = sp.csr_matrix(
                             (
@@ -383,6 +390,7 @@ class MklRuntime:
                             down_ops=self._build_ops(Direction.DOWN, state, up_grid, down_grid, artifact_layout),
                         )
                     )
+                    pending_grids = []
                 self._artifacts = tuple(artifacts)
                 self._configure_handle_hints()
                 self._grgs = tuple(BoundGRG(self, idx, artifact.state, artifact.path) for idx, artifact in enumerate(self._artifacts))
@@ -390,11 +398,15 @@ class MklRuntime:
                 return self
             except Exception:
                 self._destroy_handles(artifacts)
+                self._destroy_grids(pending_grids)
                 if self._shared_values is not None:
                     self._shared_values.destroy()
                     self._shared_values = None
                 self._up_workspace = None
                 self._down_workspace = None
+                # Assigned before _configure_handle_hints(), so it can hold handles
+                # this block just destroyed and __exit__ would free them twice.
+                self._artifacts = ()
                 raise
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -480,18 +492,29 @@ class MklRuntime:
         return MklSparseHandle(matrix, plan.fmt.value.lower(), dtype=self.layout.dtype)
 
     def _destroy_handles(self, artifacts) -> None:
+        self._destroy_grids(
+            grid for artifact in artifacts for grid in (artifact.up_grid, artifact.down_grid)
+        )
+
+    @staticmethod
+    def _destroy_grids(grids) -> None:
+        """Destroy every handle in the given grids, tolerating shared handles.
+
+        Split out of _destroy_handles so the failure path in __enter__ can also
+        release the grids of an artifact that has not been wrapped in an
+        _MklArtifact yet.
+        """
         seen: set[int] = set()
-        for artifact in artifacts:
-            for grid in (artifact.up_grid, artifact.down_grid):
-                for row in grid:
-                    for handle in row:
-                        if handle is None:
-                            continue
-                        key = id(handle)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        handle.destroy()
+        for grid in grids:
+            for row in grid:
+                for handle in row:
+                    if handle is None:
+                        continue
+                    key = id(handle)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    handle.destroy()
 
     def _configure_handle_hints(self) -> None:
         usage: dict[tuple[int, bool], dict[str, object]] = {}
