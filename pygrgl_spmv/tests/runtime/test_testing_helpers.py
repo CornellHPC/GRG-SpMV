@@ -208,7 +208,7 @@ def _backend_params():
         pytest.param(
             name,
             id=name,
-            marks=[pytest.mark.gpu, pytest.mark.cusparse] if name == "cusparse"
+            marks=[pytest.mark.cuda13, pytest.mark.cusparse] if name == "cusparse"
             else ([pytest.mark.mkl] if name == "mkl" else []),
         )
         for name in testing.BACKENDS
@@ -261,7 +261,7 @@ def test_load_releases_resources_on_exit(primary_artifact):
         runtime._call_scope().__enter__()
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_captured_grg_refuses_to_replay_after_its_runtime_is_released(primary_artifact):
     """Post-close replay used to corrupt other allocations rather than fail."""

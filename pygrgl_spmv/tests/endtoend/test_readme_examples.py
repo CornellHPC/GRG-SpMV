@@ -31,7 +31,7 @@ from pygrgl_spmv import (
     make_runconfig_pca,
 )
 
-pytestmark = [pytest.mark.gpu, pytest.mark.cusparse]
+pytestmark = [pytest.mark.cuda13, pytest.mark.cusparse]
 
 # "grapp", not "grapp.linalg": importing the latter here would pre-satisfy the circular
 # import the order test below exists to catch.

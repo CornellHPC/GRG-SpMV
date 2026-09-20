@@ -15,7 +15,7 @@ Requires Python >= 3.11. To install, use:
 
 ```bash
 pip install .          # install the basic dependencies; can be used with the MKL-based CPU backend
-pip install '.[gpu]'   # adds support for the cuSPARSE-based GPU backend
+pip install '.[cuda13]'   # adds support for the cuSPARSE-based GPU backend
 ```
 
 To use the MKL-based CPU backend, you need to install MKL manually. We recommend using the conda package manager for this.
@@ -58,7 +58,7 @@ The adaptor hides planning, layout and runtime setup for user behind three calls
 The loaded GRG artifacts are then ready for execution with `grapp`.
 A minimal example utilizing GPU (cuSparse) backend with pca: 
 
-This needs `grapp`, which is not pulled in by `pip install .` or `.[gpu]` — install it separately, or use the `dev` extra.
+This needs `grapp`, which is not pulled in by `pip install .` or `.[cuda13]` — install it separately, or use the `dev` extra.
 
 ```python
 from contextlib import ExitStack

@@ -28,13 +28,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = [
+# Named for the accelerator it targets, not generically: a future ROCm or oneAPI
+# backend gets its own extra rather than colliding with a catch-all "gpu".
+cuda13 = [
     "cupy-cuda13x>=13.6.0",
+    # torch is the CUDA-graph implementation behind capture=True (CUDAGraph, as_strided,
+    # the capture stream) -- unrelated to the removed Triton backend. It drags triton in
+    # transitively for its own inductor; that is torch's dependency, not ours.
     "torch>=2.10.0",
 ]
 dev = [
     "pytest>=9.0.2",
-    "grapp>=0.3",
+    # 0.4 for PCs(grgs, k=..., threads=...): 0.3 takes a single GRG and has neither
+    # keyword, so the README examples and their test cannot run against it.
+    "grapp>=0.4",
     "matplotlib>=3.10.8",
     "seaborn>=0.13.2",
     "igdtools>=2.6",
@@ -70,7 +77,7 @@ testpaths = [
 ]
 markers = [
     "stress: long streamed GPU stress tests",
-    "gpu: tests requiring a GPU (CuPy + cuSPARSE)",
+    "cuda13: tests requiring a CUDA 13 GPU (CuPy + cuSPARSE)",
     "mkl: tests specific to MKL backend",
     "cusparse: tests specific to cuSPARSE backend",
 ]

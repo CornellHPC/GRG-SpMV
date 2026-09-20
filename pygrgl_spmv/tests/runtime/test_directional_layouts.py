@@ -16,10 +16,10 @@ from pygrgl_spmv.tests.runtime._streaming_cases import _synthetic_state
 _BACKENDS = [
     pytest.param("reference", id="reference"),
     pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
-    pytest.param("cusparse", id="cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse]),
+    pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cuda13, pytest.mark.cusparse]),
 ]
 _GPU_BACKENDS = [
-    pytest.param("cusparse", id="cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse]),
+    pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cuda13, pytest.mark.cusparse]),
 ]
 
 

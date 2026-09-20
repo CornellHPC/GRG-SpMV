@@ -237,7 +237,7 @@ wheels = [
 
 [[package]]
 name = "grapp"
-version = "0.3"
+version = "0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grg-pheno-sim" },
@@ -248,9 +248,9 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cb/bd/8df18d5117134cf2d1251adab95fbffae2f45c4f61bda185604da3d22e4d/grapp-0.3.tar.gz", hash = "sha256:4ec2db9612c23ce327c5fac52adedb24c889f984aa3b08a06d91cdff2ab74677", size = 1218882, upload-time = "2026-02-06T19:09:00.439Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b9/27/408288b04faff41588eb1554097140a452114d60c737d36111d814412595/grapp-0.4.tar.gz", hash = "sha256:83c9ab524d94bfc3e61a4d28a1039c2f862fff048abec73b6c108584d289232d", size = 58316, upload-time = "2026-04-09T16:35:37.234Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/0b/e35093e83114264b3efebd7a5ac2d85c02a4220b2bd968b2f94a4c6bf6fd/grapp-0.3-py3-none-any.whl", hash = "sha256:b27ccceefced759a37f8dcdb2c8eda673b519d5584016cb0c1dafd00195f7a38", size = 48961, upload-time = "2026-02-06T19:08:59.316Z" },
+    { url = "https://files.pythonhosted.org/packages/97/cd/505765e551a41fa60ddb86a77a4e25ba210f9ce1e3cfb214f2293d33b434/grapp-0.4-py3-none-any.whl", hash = "sha256:f5988b9c22b45874ec2ff3f10db67c7c6ec5114ab8d6f04b813eb2a45f02bbd8", size = 60684, upload-time = "2026-04-09T16:35:36.247Z" },
 ]
 
 [[package]]
@@ -944,16 +944,18 @@ wheels = [
 
 [[package]]
 name = "pygrgl"
-version = "2.6"
+version = "2.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2e/af/d8bd36fd20c74832b268a2be63177c5e0bfd1e3b38e73c93cca94ea83d58/pygrgl-2.6.tar.gz", hash = "sha256:f025f4f06f355f89e7d066cf6f370c59a8df2d2827d1f5142f8df93d4f0f2cc7", size = 8167990, upload-time = "2026-02-06T19:07:50.437Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/1f/fc14a9cbd0131e734c7eaa2f4282fbc67d33cedc5c2a4e513939c9bd7a7b/pygrgl-2.10.tar.gz", hash = "sha256:61c37909b241d42ccf16ea8dff1e7f619080cd0a3751871d964b4c112e486ed4", size = 8195346, upload-time = "2026-07-17T14:44:11.597Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5f/dd/71373cd7173556b825f4795b6a1e3da97eb0bffc0dd457d7f331c3ac7de8/pygrgl-2.6-cp311-cp311-manylinux_2_24_x86_64.whl", hash = "sha256:e1e097c41fb100af2071e7ee0cb0276dcf54f4ecf31044a136e335a7fb95a814", size = 1839445, upload-time = "2026-02-06T19:07:43.875Z" },
-    { url = "https://files.pythonhosted.org/packages/1a/c2/8479c25fa8e8b8a23e1709962ed7d9320cd05de94778678a4d529fde766a/pygrgl-2.6-cp312-cp312-manylinux_2_24_x86_64.whl", hash = "sha256:1deee8d01200f8b408f23845a623e49e80955dcb397ecec7118703885cdeea5f", size = 1841302, upload-time = "2026-02-06T19:07:45.089Z" },
-    { url = "https://files.pythonhosted.org/packages/45/f4/fa426de798e35cfc87ca41223828c8ad3b7dd8b783df796d0f35236afab4/pygrgl-2.6-cp313-cp313-manylinux_2_24_x86_64.whl", hash = "sha256:5f163f5faa1198488e319a1b5167fdb1518870c5444aa82d2e648494824b19d2", size = 1841190, upload-time = "2026-02-06T19:07:46.314Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/4f/a270de2e7060fdf962b01aa6d939b1be3a654c4fb535eab0f4ffaf1273c8/pygrgl-2.10-cp311-cp311-manylinux_2_24_x86_64.whl", hash = "sha256:e54887e8757fa47a2ce62c24e87f9de0934905a30b34c6454862ebafca205b92", size = 2028941, upload-time = "2026-07-17T14:44:02.606Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/f2/c0fc51a12a31c8f6fa9c6e99f83d731d5d7366cc473485cfa9678784d27a/pygrgl-2.10-cp312-cp312-manylinux_2_24_x86_64.whl", hash = "sha256:17ef2dabae9c7b9bff8ee091edef8dce17dbdcd3cd5b04c904954990ef974a8c", size = 2032016, upload-time = "2026-07-17T14:44:03.851Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/a7/cb7983cb65a2726979c2b1ccaddb02a7c7fadff00b1e49923145cb6d8767/pygrgl-2.10-cp313-cp313-manylinux_2_24_x86_64.whl", hash = "sha256:e2d265690066557dcbca5e4f2660c7a97d0e51a3e945d0eea74d212ab5644652", size = 2032366, upload-time = "2026-07-17T14:44:05.325Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/80/6af2a2bf02773c57985f67c37d985c33d5d12f4d679b0ebc56862039fbeb/pygrgl-2.10-cp314-cp314-manylinux_2_24_x86_64.whl", hash = "sha256:7d6e343b12a950382664c94aca81fe54077dcf2dd3c12fcda54ff5d0e0c38426", size = 2032793, upload-time = "2026-07-17T14:44:06.554Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/16/c4ff58ed90683bc5e28c53d78eb4f9b707b3c976d86e780e78b7e4780e0b/pygrgl-2.10-cp315-cp315-manylinux_2_24_x86_64.whl", hash = "sha256:56b7ed2e2d0c2a81e3d9e92f6421922ac900c190e5997f9eed0ae874cd4875df", size = 2032795, upload-time = "2026-07-17T14:44:07.833Z" },
 ]
 
 [[package]]
@@ -967,6 +969,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+cuda13 = [
+    { name = "cupy-cuda13x" },
+    { name = "torch" },
+]
 dev = [
     { name = "grapp" },
     { name = "igdtools" },
@@ -975,15 +981,11 @@ dev = [
     { name = "pytest" },
     { name = "seaborn" },
 ]
-gpu = [
-    { name = "cupy-cuda13x" },
-    { name = "torch" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "cupy-cuda13x", marker = "extra == 'gpu'", specifier = ">=13.6.0" },
-    { name = "grapp", marker = "extra == 'dev'", specifier = ">=0.3" },
+    { name = "cupy-cuda13x", marker = "extra == 'cuda13'", specifier = ">=13.6.0" },
+    { name = "grapp", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "igdtools", marker = "extra == 'dev'", specifier = ">=2.6" },
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=1.26.0" },
@@ -992,9 +994,9 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
     { name = "scipy", specifier = ">=1.10.0" },
     { name = "seaborn", marker = "extra == 'dev'", specifier = ">=0.13.2" },
-    { name = "torch", marker = "extra == 'gpu'", specifier = ">=2.10.0" },
+    { name = "torch", marker = "extra == 'cuda13'", specifier = ">=2.10.0" },
 ]
-provides-extras = ["gpu", "dev"]
+provides-extras = ["cuda13", "dev"]
 
 [[package]]
 name = "pyigd"

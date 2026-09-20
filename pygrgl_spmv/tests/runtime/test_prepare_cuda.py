@@ -14,7 +14,7 @@ from pygrgl_spmv.tests.runtime._runtime_builders import (
 )
 
 _GPU_BACKENDS = (
-    pytest.param("cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse], id="cusparse"),
+    pytest.param("cusparse", marks=[pytest.mark.cuda13, pytest.mark.cusparse], id="cusparse"),
 )
 _DIRECTIONS = (
     pytest.param("up", pygrgl.TraversalDirection.UP, id="up"),
