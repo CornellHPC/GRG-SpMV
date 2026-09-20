@@ -11,7 +11,7 @@ Currently, the following hardware is supported:
 
 ## Install
 
-Requires Python >= 3.10. To install, use:
+Requires Python >= 3.11. To install, use:
 
 ```bash
 pip install .          # install the basic dependencies; can be used with the MKL-based CPU backend
@@ -97,7 +97,7 @@ The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
 | `capture` | `False` | Capture CUDA graphs after loading and return a `CapturedBoundGRG`, so matmul replays a graph instead of re-issuing kernels. |
 | `native` | `False` | Keep matmul I/O on device (CuPy in, CuPy out, no host copies). Requires `capture=True` — on its own it is silently ignored. In this mode `miss` is an in-place accumulator on the device: pass the array you will read afterwards, never a fresh `cupy.asarray(host_array)`, or the counts are written to a temporary and lost. |
 
-Both `n_threads` and `device` accept a mapping keyed by artifact file stem, which is how the JSON configs under `examples/configs/` are shaped:
+Both `n_threads` and `device` accept a mapping keyed by artifact file stem. That is the shape of the JSON configs used by the Mikado benchmark harness (`benchmark/configs/` in the [mikado](https://github.com/CornellHPC/mikado) repository):
 
 ```json
 {"chr1": {"cuda_device": 0},        "chr2": {"cuda_device": 1}}
@@ -176,14 +176,20 @@ with CusparseRuntime(layout) as runtime:
 
 ### Public surface
 
-- Package root exports:
-  - `simple_convert(grg_path, artifact_path, *, dtype=float64) -> Path`
-  - `RuntimeRequirements`
-  - `plan_reference_layout(...)`, `ReferenceRuntime`
-  - `plan_mkl_layout(...)`, `MklRuntime`
-- GPU backends are imported from their subpackages:
-  - `pygrgl_spmv.backends.cusparse`
-- GPU execution is centered on `grg.prepare_matmul_cuda(...)`; eager `grg.matmul(...)` is a NumPy convenience wrapper over that prepared path
+Everything in `pygrgl_spmv.__all__`, grouped by role:
+
+- **Conversion** — `simple_convert(input_path, output_path, *, dtype=float64) -> Path`
+- **Adaptor (the front door)** — `make_backend_mkl`, `make_backend_cusparse`, `make_runconfig_kernel`, `make_runconfig_pca`, `make_runconfig_bolt`, `make_runconfig_gwas`, `load_grg_spmv_single`, `load_grg_spmv_multi`
+- **Adaptor value objects** — `MklBackendConfig`, `CusparseBackendConfig`, `RunConfigs`, `CaptureSpec`, `CapturedBoundGRG`
+- **Lower-level planning/execution** — `RuntimeRequirements`, `plan_reference_layout` + `ReferenceRuntime` + `ReferencePlan` + `ReferencePlanPair`, `plan_mkl_layout` + `MklRuntime` + `MklPlan` + `MklPlanPair`
+
+Not re-exported from the root, on purpose:
+
+- The cuSPARSE planner and runtime live in `pygrgl_spmv.backends.cusparse`, so that `import pygrgl_spmv` stays CPU-safe and works with CuPy and torch absent.
+- Test helpers live in `pygrgl_spmv.testing` (see [Testing Against pygrgl-spmv](#testing-against-pygrgl-spmv)).
+- `BoundGRG` is the class every loaded GRG actually is, but it is only ever obtained from a runtime or a loader, never constructed directly.
+
+GPU execution is centered on `grg.prepare_matmul_cuda(...)`; eager `grg.matmul(...)` is a NumPy convenience wrapper over that prepared path.
 
 ## Testing Against pygrgl-spmv
 
@@ -236,3 +242,5 @@ There is no `exit_stack` parameter: the loaders are context managers, and your t
 - GPU layouts can mix resident and streamed sparse blocks under a VRAM budget
 - `ring_buffer_size=0` is valid for GPU layouts only when the budget keeps every sparse block resident
 - the package root intentionally stays CPU-safe and does not re-export GPU runtime symbols
+- in `native=True` mode, `matmul` awaits only CuPy's *current* stream on the capture device, which is where a plain `cupy.asarray(...)` enqueues. Synchronize inputs yourself if you produce them on an explicit `cupy.cuda.Stream()`, or hand over a CuPy view of torch memory
+- native-mode missingness has an open `grapp`-side defect: see [docs/grapp-native-miss-issue.md](docs/grapp-native-miss-issue.md)

@@ -80,6 +80,8 @@ The suite protects seven things:
   - End-to-end equivalence against `pygrgl.dot_product`, explicit genotype matrices, diploid semantics, init modes, and GRG splitting.
 - `endtoend/test_missing.py`
   - End-to-end missingness counts, mean-imputation semantics, and shared-site missingness equality.
+- `endtoend/test_readme_examples.py`
+  - The project README's grapp examples, executed as printed: that the documented blocks run at all, which reading them twice failed to establish.
 
 ## Maintenance Rule
 
