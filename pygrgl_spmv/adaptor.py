@@ -675,7 +675,7 @@ def make_runconfig_kernel(direction, k, force_spmm=False) -> RunConfigs:
     """
     if direction not in ("up", "down"):
         raise ValueError(f"direction must be 'up' or 'down', got {direction!r}")
-    cap_k = 2 if (force_spmm and k == 1) else int(k)
+    cap_k = _resolve_capture_k(k, force_spmm)
     return RunConfigs(
         req=RuntimeRequirements(
             max_k_up=cap_k,
@@ -744,7 +744,7 @@ def make_runconfig_bolt(force_spmm=False, **kwargs) -> RunConfigs:
     """
     if kwargs:
         raise TypeError(f"make_runconfig_bolt() got unexpected keyword arguments: {sorted(kwargs)}")
-    k = 2 if force_spmm else 1
+    k = _resolve_capture_k(1, force_spmm)
     return RunConfigs(
         req=RuntimeRequirements(
             max_k_up=k,
