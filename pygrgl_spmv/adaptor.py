@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import concurrent.futures
+import contextlib
+import functools
 import os
 import threading
+from numbers import Integral
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -148,9 +150,25 @@ class CapturedBoundGRG:
                 _cp_ndarray = ()
 
             if not (_cp_ndarray and isinstance(arr, _cp_ndarray)):
+                hint = ""
+                if role == "miss-out":
+                    # This message is load-bearing. The previous wording -- "expected
+                    # cupy.ndarray ..., got ndarray" -- reads as an instruction to
+                    # write cupy.asarray(miss), and a caller who does that gets a
+                    # *temporary*: the in-place accumulate below lands on the copy and
+                    # the caller's array is never updated, silently losing all
+                    # missingness. Say so explicitly.
+                    hint = (
+                        " Note that miss is an in-place accumulator: pass the very "
+                        "array you intend to read afterwards. Do NOT wrap a host "
+                        "array in cupy.asarray() here -- that creates a temporary, "
+                        "and the accumulated missingness would be written to the "
+                        "temporary and lost. Either keep miss on the device for the "
+                        "whole computation, or load with native=False."
+                    )
                 raise TypeError(
                     f"matmul(): {name} ({role}) expected cupy.ndarray on "
-                    f"{expected_device} (native mode), got {type(arr).__name__}"
+                    f"{expected_device} (native mode), got {type(arr).__name__}.{hint}"
                 )
             if arr.device.id != expected_device.index:
                 raise TypeError(
@@ -272,8 +290,11 @@ class CapturedBoundGRG:
         Single-stream execution makes all ordering implicit, so no device-wide
         barriers are used. Two stream-scoped syncs bracket the work:
           entry: in native mode, ``cupy.cuda.get_current_stream().synchronize()``
-                 — wait for the caller's pending work that produced the cupy
-                 inputs before reading them on capture_stream.
+                 — only the caller's *current* cupy stream, which is where a plain
+                 ``cupy.asarray(...)`` enqueues. Inputs produced on an explicit
+                 ``cupy.cuda.Stream()``, or cupy views of memory a torch stream is
+                 still writing, must be synchronized by the caller: a cupy array
+                 does not carry its producing stream, so this is a contract.
           exit:  ``capture_stream.synchronize()`` — drain only this stream so the
                  result and in-place miss update are ready for the caller.
 
@@ -285,7 +306,12 @@ class CapturedBoundGRG:
             Array shape mismatch, or required ``init``/``miss`` missing for the
             captured key.
         """
+        # __getattr__ reaches the eager path's own parser; .value because capture
+        # keys hold plain strings. Every flag in the key needs bool(), or a truthy
+        # non-bool misses a graph that was in fact captured.
+        direction = self._parse_direction(direction).value
         emit_all_nodes = bool(emit_all_nodes)
+        by_individual = bool(by_individual)
 
         with self._device_lock:
             # Inside the lock: _invalidate() takes the same one, which is what makes
@@ -400,7 +426,7 @@ class CapturedBoundGRG:
             # — the cupy output copy and the miss accumulate. Because every op is on
             # one stream, ordering is implicit (intra-stream) and no device-wide
             # barriers are needed. Only two stream-scoped syncs remain:
-            #   entry: wait for the caller's pending work that produced the inputs
+            #   entry: wait for the caller's current-stream work that produced them
             #   exit:  drain capture_stream so result/miss are ready for the caller
             cap = self._capture_stream
 
@@ -416,8 +442,15 @@ class CapturedBoundGRG:
                 # stream in the calling thread.
                 with cp.cuda.Device(src.device.index):
                     cp.cuda.get_current_stream().synchronize()
-        
-            torch.cuda.synchronize(src.device)
+
+            # Drain ONLY capture_stream, never the whole device. The previous call's
+            # exit sync already left cap idle, so this is normally free; keeping it
+            # makes entry symmetric with exit and safe if a caller ever touches cap
+            # directly. A device-wide torch.cuda.synchronize() here -- which is what
+            # this used to be, directly contradicting the comment above -- also waits
+            # on every unrelated stream on the same GPU: measured 0.17 ms idle versus
+            # 776 ms with 300 unrelated matmuls queued elsewhere on the device.
+            cap.synchronize()
 
             nvtx.range_pop()
 
@@ -489,14 +522,14 @@ class CapturedBoundGRG:
                             result = cp.asarray(op.output[:k_prime, :]).copy()
                             if input_is_int32:
                                 result = result.astype(cp.int32)
-                            if use_miss and hasattr(op, "miss_output") and miss is not None:
+                            if use_miss and key not in self._miss_tensors:
                                 miss += cp.asarray(op.miss_output[:k_prime, :]).astype(miss.dtype, copy=False)
                 else:
                     # .cpu() copies on cap (current stream) and syncs that copy.
                     result = op.output[:k_prime, :].cpu().numpy().copy()
                     if input_is_int32:
                         result = result.astype(np.int32)
-                    if use_miss and hasattr(op, "miss_output") and miss is not None:
+                    if use_miss and key not in self._miss_tensors:
                         miss += op.miss_output[:k_prime, :].cpu().numpy().astype(miss.dtype, copy=False)
                 nvtx.range_pop()
 
@@ -546,8 +579,12 @@ class MklBackendConfig:
     """Configuration for the MKL CPU backend.
 
     n_threads: int or dict mapping file stem to {"mkl_threads": [n_up, n_down]}.
-    A value of 0 (or a per-direction 0) triggers auto-detection:
-    physical_cores // n_files, minimum 1.
+
+    A scalar 0 triggers auto-detection: physical_cores // n_files, minimum 1.
+    A 0 inside the dict form does NOT do the same thing -- dict values are passed
+    through verbatim, and MKL then treats 0 as its own default of os.cpu_count(),
+    giving every file the whole machine. That asymmetry is deliberate but easy to
+    trip over.
     """
     n_threads: object   # int | dict[str, {"mkl_threads": [int, int]}]
     optimize: bool = False
@@ -565,7 +602,8 @@ class CusparseBackendConfig:
         False (streaming mode), where it must be > 0. Ignored (and left 0) in
         resident mode.
     capture: if True, capture CUDA graphs after loading and return CapturedBoundGRG.
-    native: if True, CapturedBoundGRG uses GPU-native I/O (matmul_native).
+    native: if True, CapturedBoundGRG.matmul() keeps I/O on the device (CuPy in,
+        CuPy out, no host copies). Requires capture=True; on its own it is ignored.
     """
     device: object      # int | dict[str, {"cuda_device": int}]
     allow_residency: bool = True
@@ -663,10 +701,7 @@ def make_runconfig_pca(force_spmm=False, maxk=1, **kwargs) -> RunConfigs:
     """
     if kwargs:
         raise TypeError(f"make_runconfig_pca() got unexpected keyword arguments: {sorted(kwargs)}")
-    if maxk==1:
-        k = 2 if force_spmm else 1
-    else:
-        k = maxk
+    k = _resolve_capture_k(maxk, force_spmm)
     return RunConfigs(
         req=RuntimeRequirements(
             max_k_up=k,
@@ -708,7 +743,7 @@ def make_runconfig_bolt(force_spmm=False, **kwargs) -> RunConfigs:
         serve k=1 callers via CapturedBoundGRG.matmul()'s zero-pad/truncate.
     """
     if kwargs:
-        raise TypeError(f"make_runconfig_boltlmm() got unexpected keyword arguments: {sorted(kwargs)}")
+        raise TypeError(f"make_runconfig_bolt() got unexpected keyword arguments: {sorted(kwargs)}")
     k = 2 if force_spmm else 1
     return RunConfigs(
         req=RuntimeRequirements(
@@ -755,9 +790,7 @@ def make_runconfig_gwas(force_spmm=False, maxk=1, sample_variance=True, **kwargs
     """
     if kwargs:
         raise TypeError(f"make_runconfig_gwas() got unexpected keyword arguments: {sorted(kwargs)}")
-    if not isinstance(maxk, int) or maxk < 1:
-        raise ValueError(f"maxk must be an int >= 1, got {maxk!r}")
-    k = (2 if force_spmm else 1) if maxk == 1 else maxk
+    k = _resolve_capture_k(maxk, force_spmm)
 
     capture_ops = [
         CaptureSpec("up", k, by_individual=False, use_miss=True),   # allele_counts
@@ -789,6 +822,24 @@ def make_runconfig_gwas(force_spmm=False, maxk=1, sample_variance=True, **kwargs
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_capture_k(maxk, force_spmm) -> int:
+    """Capture width for a run configuration.
+
+    force_spmm only matters at maxk == 1: it escapes the k=1 SpMV path, and at
+    maxk >= 2 the SpMM path is already in use, so the width is identical either
+    way. Previously spelled out three times, once without the int validation --
+    which let make_runconfig_pca(maxk=2.5) reach max_k_up.
+
+    Integral rather than int, matching parse_cuda_device: a maxk off a numpy
+    reduction or a pandas count is an np.int64, which int() used to accept.
+    """
+    if isinstance(maxk, bool) or not isinstance(maxk, Integral) or maxk < 1:
+        raise ValueError(f"maxk must be an int >= 1, got {maxk!r}")
+    if maxk == 1:
+        return 2 if force_spmm else 1
+    return int(maxk)
+
 
 def _bare_req(req) -> RuntimeRequirements:
     """Extract the RuntimeRequirements from a RunConfigs or pass through."""
@@ -829,15 +880,94 @@ def _validate_stack(stack) -> None:
         raise TypeError(f"stack must be contextlib.ExitStack, got {type(stack).__name__}")
 
 
-def _physical_cores() -> int:
+#: Overridden in tests; a cgroup namespace makes the container's own cgroup the root,
+#: which is why reading this directly is right for `docker --cpus` and k8s limits.
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def _cgroup_cpu_quota() -> int | None:
+    """CPUs permitted by a CFS quota, or None if there is no quota.
+
+    A CPU *limit* -- what `docker --cpus=2` and Kubernetes `limits.cpu` set -- is a
+    quota, not a cpuset, so sched_getaffinity still reports every host CPU. v2 puts
+    "<quota> <period>" in cpu.max, with the literal "max" for unlimited; v1 splits it
+    across two files and uses -1.
+    """
     try:
-        import psutil
-        cores = psutil.cpu_count(logical=False)
-        if cores:
-            return cores
-    except ImportError:
+        quota, period = (_CGROUP_ROOT / "cpu.max").read_text().split()[:2]
+    except (OSError, ValueError):
+        try:
+            quota = (_CGROUP_ROOT / "cpu" / "cpu.cfs_quota_us").read_text()
+            period = (_CGROUP_ROOT / "cpu" / "cpu.cfs_period_us").read_text()
+        except OSError:
+            return None
+    try:
+        quota_us, period_us = int(quota), int(period)
+    except ValueError:  # v2 spells unlimited "max"
+        return None
+    if quota_us <= 0 or period_us <= 0:
+        return None
+    # Floor: the point is to stay under the quota, so --cpus=2.5 must yield 2. Ceiling
+    # would hand out 3 threads against 2.5 CPUs and reintroduce the CFS throttling
+    # this cap exists to avoid.
+    return max(1, quota_us // period_us)
+
+
+@functools.cache
+def _physical_cores() -> int:
+    """Number of physical cores usable by this process.
+
+    This used to call psutil, which is not a declared dependency of this package
+    and is usually absent -- so the ImportError fallback made n_threads=0 hand out
+    os.cpu_count() logical CPUs, i.e. twice the documented number on an SMT
+    machine. Reading sysfs needs no dependency.
+
+    Three sources, because no one of them sees every kind of limit. Topology is not
+    namespaced (under a cgroup it reports the whole host); sched_getaffinity sees a
+    cpuset or taskset but counts *logical* CPUs, siblings included; and neither sees
+    a CFS quota, which is what `docker --cpus` and Kubernetes CPU limits actually
+    set. So: walk only the allowed CPUs, count distinct sibling groups, and cap by
+    the quota. Cached, since _load_mkl_multi asks once per file.
+    """
+    allowed = os.sched_getaffinity(0) if hasattr(os, "sched_getaffinity") else None
+    usable = len(allowed) if allowed is not None else (os.cpu_count() or 1)
+    quota = _cgroup_cpu_quota()
+    if quota is not None:
+        usable = min(usable, quota)
+    try:
+        siblings = set()
+        cpu_root = Path("/sys/devices/system/cpu")
+        for cpu_dir in cpu_root.glob("cpu[0-9]*"):
+            if allowed is not None and int(cpu_dir.name[3:]) not in allowed:
+                continue
+            topology = cpu_dir / "topology" / "thread_siblings_list"
+            if topology.is_file():
+                siblings.add(topology.read_text().strip())
+        if siblings:
+            return min(len(siblings), usable)
+    except OSError:
         pass
-    return os.cpu_count() or 1
+    try:
+        cores = set()
+        physical_id = core_id = None
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            key, _, value = line.partition(":")
+            key, value = key.strip(), value.strip()
+            if key == "physical id":
+                physical_id = value
+            elif key == "core id":
+                core_id = value
+            elif not line.strip():
+                if physical_id is not None and core_id is not None:
+                    cores.add((physical_id, core_id))
+                physical_id = core_id = None
+        if physical_id is not None and core_id is not None:
+            cores.add((physical_id, core_id))
+        if cores:
+            return min(len(cores), usable)
+    except OSError:
+        pass
+    return usable
 
 
 def _auto_threads(n_files: int) -> int:
@@ -878,7 +1008,19 @@ def _resolve_mkl_threads(cfg: MklBackendConfig, path: Path, n_files: int) -> tup
 def _available_cuda_devices() -> int:
     try:
         import cupy as cp
-        return cp.cuda.runtime.getDeviceCount()
+    except ImportError as exc:
+        # Distinguish "no GPU extras installed" from "no GPU present"; the old code
+        # swallowed this and reported the packaging error as a hardware error.
+        raise ImportError(
+            "the cuSPARSE backend requires the GPU extras: pip install 'pygrgl-spmv[gpu]'"
+        ) from exc
+    except Exception as exc:
+        # A cupy that imports but cannot initialise (runtime/driver mismatch) is not a
+        # packaging problem. Kept as RuntimeError, which is what this raised before the
+        # ImportError branch above was split out.
+        raise RuntimeError(f"the cuSPARSE backend could not initialise cupy: {exc}") from exc
+    try:
+        return int(cp.cuda.runtime.getDeviceCount())
     except Exception:
         return 0
 
@@ -936,6 +1078,25 @@ _VALID_INIT_MODES = {"none", "vector", "matrix", "xtx"}
 
 
 def _validate_capture_spec(spec: CaptureSpec, req: RuntimeRequirements) -> None:
+    if spec.direction not in ("up", "down"):
+        raise ValueError(f"CaptureSpec.direction must be 'up' or 'down', got {spec.direction!r}")
+    if isinstance(spec.k, bool) or not isinstance(spec.k, Integral) or spec.k < 1:
+        raise ValueError(f"CaptureSpec.k must be an int >= 1, got {spec.k!r}")
+    # Rejected rather than coerced: these three go into the capture key verbatim, while
+    # matmul() normalises its arguments with bool(), so a truthy non-bool here captures
+    # a graph under a key no call can ever produce.
+    for field_name in ("by_individual", "use_miss", "emit_all_nodes"):
+        value = getattr(spec, field_name)
+        if not isinstance(value, bool):
+            raise ValueError(f"CaptureSpec.{field_name} must be a bool, got {value!r}")
+    # Here rather than at load time, so a factory whose max_k_* and CaptureSpec.k
+    # drift apart fails on CPU instead of only on a GPU.
+    limit = req.max_k_up if spec.direction == "up" else req.max_k_down
+    if spec.k > limit:
+        raise ValueError(
+            f"CaptureSpec.k={spec.k} for {spec.direction!r} exceeds the declared "
+            f"max_k_{spec.direction}={limit}"
+        )
     if spec.init_mode not in _VALID_INIT_MODES:
         raise ValueError(
             f"CaptureSpec.init_mode {spec.init_mode!r} invalid; expected one of {sorted(_VALID_INIT_MODES)}"

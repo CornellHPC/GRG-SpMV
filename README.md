@@ -84,7 +84,7 @@ The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `n_threads` | `0` | Threads per file. `0` auto-detects `physical_cores // n_files`, minimum 1. Also accepts a per-file dict. |
+| `n_threads` | `0` | Threads per file. `0` auto-detects `physical_cores // n_files`, minimum 1. Core topology comes from the kernel, counting only CPUs in the process's affinity mask and capped by any cgroup CPU quota, so `taskset`, a cpuset, and a `docker --cpus` / Kubernetes CPU limit are all respected. Also accepts a per-file dict. |
 | `optimize` | `False` | Run MKL's inspector-executor `mkl_sparse_optimize()` on each matrix at load. Costs load time, can speed up repeated matmuls. |
 
 `make_backend_cusparse(device=0, allow_residency=True, vram_budget_mb=0, capture=False, native=False)`
@@ -95,7 +95,7 @@ The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
 | `allow_residency` | `True` | Keep every sparse block resident in VRAM. `False` selects streaming mode. |
 | `vram_budget_mb` | `0` | VRAM cap in MiB. Used only in streaming mode, where it must be `> 0`; ignored when resident. |
 | `capture` | `False` | Capture CUDA graphs after loading and return a `CapturedBoundGRG`, so matmul replays a graph instead of re-issuing kernels. |
-| `native` | `False` | Keep matmul I/O on device (CuPy in, CuPy out, no host copies). Requires `capture=True` — on its own it is silently ignored. |
+| `native` | `False` | Keep matmul I/O on device (CuPy in, CuPy out, no host copies). Requires `capture=True` — on its own it is silently ignored. In this mode `miss` is an in-place accumulator on the device: pass the array you will read afterwards, never a fresh `cupy.asarray(host_array)`, or the counts are written to a temporary and lost. |
 
 Both `n_threads` and `device` accept a mapping keyed by artifact file stem, which is how the JSON configs under `examples/configs/` are shaped:
 

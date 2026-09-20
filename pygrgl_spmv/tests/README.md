@@ -38,6 +38,8 @@ The suite protects seven things:
   - CPU-safe package import surface under blocked optional GPU modules.
 - `test_bench_scripts.py`
   - Minimal benchmark runner loop counts and reporting contract.
+- `runtime/test_adaptor_surface.py`
+  - Adaptor surface contracts: backend/run-config factory validation (including uniform `maxk` checking), `_physical_cores` reading kernel topology rather than logical CPUs and capping by CPU affinity, per-file `mkl_threads`/`cuda_device` dict resolution, `load_grg_spmv_*` argument validation, every accepted `direction` form on the captured path, and missingness agreement across reference/MKL/cuSPARSE plus captured copy and native modes.
 - `runtime/test_adaptor_capture.py`
   - Capture-key correctness for the adaptor's CUDA-graph path: CPU-only snapshots of every `make_runconfig_*` capture set and `need_*` flag (self-consistency, uniqueness, no unused flag), plus GPU parity of every captured key against the eager path, loud failure on an uncaptured key, exact-k rejection of short init/miss, pad/truncate for short input, `emit_all_nodes`, and multi-artifact load ordering.
 - `runtime/test_testing_helpers.py`
