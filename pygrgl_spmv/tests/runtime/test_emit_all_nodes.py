@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+import functools
 
 import numpy as np
 import pygrgl
 import pytest
 
-from pygrgl_spmv import ReferenceRuntime
+from pygrgl_spmv import testing
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
-from pygrgl_spmv.tests.runtime._runtime_builders import build_reference_layout, full_requirements
 
-
-@contextmanager
-def _open_reference_grg(artifact, *, dtype=np.float64):
-    with ReferenceRuntime(build_reference_layout([artifact], dtype=dtype, requirements=full_requirements(max_k_up=8, max_k_down=8))) as runtime:
-        yield runtime.grgs[0]
+_open_reference_grg = functools.partial(testing.load_reference, max_k=8)
 
 
 @pytest.mark.parametrize("direction", [pygrgl.TraversalDirection.UP, pygrgl.TraversalDirection.DOWN], ids=["up", "down"])

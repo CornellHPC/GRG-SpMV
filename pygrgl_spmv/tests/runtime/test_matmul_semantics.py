@@ -1,25 +1,15 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-
 import numpy as np
 import pygrgl
 import pytest
 
-from pygrgl_spmv import ReferenceRuntime
+from pygrgl_spmv import testing
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
-from pygrgl_spmv.tests.runtime._runtime_builders import build_reference_layout, full_requirements
 
 
-@contextmanager
 def _open_reference_grg(artifact, *, requirements=None, dtype=np.float64):
-    layout = build_reference_layout(
-        [artifact],
-        dtype=dtype,
-        requirements=full_requirements() if requirements is None else requirements,
-    )
-    with ReferenceRuntime(layout) as runtime:
-        yield runtime.grgs[0]
+    return testing.load_reference(artifact, req=requirements, dtype=dtype)
 
 
 def test_by_individual(primary_artifact, primary_grg):
@@ -187,7 +177,7 @@ def test_matmul_requires_numpy_array_inputs(primary_artifact):
 
 
 def test_runtime_requirements_reject_undeclared_modes(primary_artifact):
-    requirements = full_requirements(
+    requirements = testing.requirements(
         max_k_up=1,
         max_k_down=1,
         need_down_miss_input=False,

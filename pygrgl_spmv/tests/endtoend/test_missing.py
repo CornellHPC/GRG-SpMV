@@ -6,8 +6,7 @@ import numpy as np
 import pygrgl
 import pytest
 
-from pygrgl_spmv import ReferenceRuntime
-from pygrgl_spmv.tests.runtime._runtime_builders import build_reference_layout, full_requirements
+from pygrgl_spmv import testing
 
 from .conftest import allele_frequencies, grg_to_matrix, samples_below_node
 
@@ -16,7 +15,7 @@ MISSING_SAMPLES = 25
 
 
 def _open_reference_grg(missing_artifact):
-    return ReferenceRuntime(build_reference_layout([missing_artifact], requirements=full_requirements(max_k_up=8, max_k_down=8)))
+    return testing.load_reference(missing_artifact, max_k=8)
 
 
 def test_missing_nodes_and_counts(missing_grg):
@@ -35,8 +34,7 @@ def test_missing_nodes_and_counts(missing_grg):
 
 
 def test_missing_matmul_semantics(missing_grg, missing_artifact):
-    with _open_reference_grg(missing_artifact) as runtime:
-        (grg,) = runtime.grgs
+    with _open_reference_grg(missing_artifact) as grg:
         X = grg_to_matrix(missing_grg, diploid=True)
         nonstandard = np.where((X > 0) & (X != 1) & (X != 2))[0]
         assert len(nonstandard) == MISSING_INDIVS
@@ -67,8 +65,7 @@ def test_missing_matmul_semantics(missing_grg, missing_artifact):
 
 
 def test_shared_site_missingness_affects_all_variants(missing_grg, missing_artifact):
-    with _open_reference_grg(missing_artifact) as runtime:
-        (grg,) = runtime.grgs
+    with _open_reference_grg(missing_artifact) as grg:
         mut_info = {mut_id: missing_grg.get_mutation_by_id(mut_id) for mut_id in range(missing_grg.num_mutations)}
         groups = defaultdict(list)
         for mut_id, _node, miss_node in missing_grg.get_mutation_node_miss():
