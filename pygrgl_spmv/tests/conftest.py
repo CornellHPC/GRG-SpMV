@@ -9,37 +9,13 @@ import numpy as np
 import pygrgl
 import pytest
 from pygrgl_spmv import simple_convert
+from pygrgl_spmv.testing import is_cusparse_available, is_mkl_available
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PRIMARY_GRG = str(REPO_ROOT / "pygrgl_spmv" / "tests" / "data" / "msprime.example.igd.final.grg")
 DEFAULT_MISSING_GRG = str(REPO_ROOT / "pygrgl_spmv" / "tests" / "data" / "test-200-samples.miss.final.grg")
 
 DATA_DTYPE = np.float64
-
-
-def _has_mkl_runtime() -> bool:
-    try:
-        from pygrgl_spmv.backends.mkl import ffi as mkl_ffi
-
-        mkl_ffi._ensure_loaded()
-        return True
-    except Exception:
-        return False
-
-
-def _has_cusparse_runtime() -> bool:
-    try:
-        import cupy as cp
-        import torch
-
-        cp.cuda.runtime.getDeviceCount()
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
-
-
-HAS_MKL_RUNTIME = _has_mkl_runtime()
-HAS_CUSPARSE_RUNTIME = _has_cusparse_runtime()
 
 
 def pytest_addoption(parser):
@@ -87,13 +63,17 @@ def pytest_collection_modifyitems(config, items):
         case _:
             raise ValueError(f"unexpected --backend value {backend!r}")
 
-    if not HAS_MKL_RUNTIME:
+    # The shipped predicates rather than hand-rolled probes: the suite's old cuSPARSE
+    # probe called cuInit, leaving every forked child unable to use CUDA. Called here
+    # rather than at module scope because the cuSPARSE one imports torch and cupy
+    # (~1.4 s), which --backend=mkl then never pays for.
+    if not is_mkl_available():
         skip = pytest.mark.skip(reason="MKL runtime unavailable (libmkl_rt.so not found)")
         for item in items:
             if "mkl" in item.keywords:
                 item.add_marker(skip)
 
-    if not HAS_CUSPARSE_RUNTIME:
+    if backend != "mkl" and not is_cusparse_available():
         skip = pytest.mark.skip(reason="cuSPARSE runtime unavailable (CuPy + CUDA not found)")
         for item in items:
             if "cusparse" in item.keywords:

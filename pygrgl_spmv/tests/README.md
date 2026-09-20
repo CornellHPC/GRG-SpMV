@@ -36,6 +36,8 @@ The suite protects five things:
   - CPU-safe package import surface under blocked optional GPU modules.
 - `test_bench_scripts.py`
   - Minimal benchmark runner loop counts and reporting contract.
+- `runtime/test_testing_helpers.py`
+  - Contract for the shipped `pygrgl_spmv.testing` helpers: no `test_`-prefixed public name (pytest would collect it in the consumer's suite), importable with pytest blocked, fork-safe availability probes that leave the CUDA driver uninitialised, context-manager lifetimes with no caller-supplied `ExitStack`, the post-release replay guard, and the strict per-backend keyword allowlist.
 - `runtime/test_convert.py`
   - `simple_convert()` explicit-in/explicit-out contract: exact destination, suffix appending, parent creation, atomic overwrite, resolved return, rejected inputs/dtypes, validate-before-work (including both directory spellings and an unloadable GRG), the `python -m pygrgl_spmv convert` exit codes, byte reproducibility, and down-edge-only compilation.
 - `runtime/test_artifacts.py`

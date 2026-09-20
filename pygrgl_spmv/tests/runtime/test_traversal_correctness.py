@@ -1,29 +1,20 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-
 import numpy as np
 import pygrgl
 import pytest
 
-from pygrgl_spmv import ReferenceRuntime
+from pygrgl_spmv import testing
 from pygrgl_spmv.grg.compile import compile_grg
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, binary_pm1, tol
-from pygrgl_spmv.tests.runtime._runtime_builders import build_reference_layout, full_requirements
 
 _K_MATRIX = [1, 2, 3, 7, 8, 9, 16, 20]
 
 
-@contextmanager
 def _open_reference_grg(artifact, *, dtype=np.float64, max_k: int = 20):
-    with ReferenceRuntime(
-        build_reference_layout(
-            [artifact],
-            dtype=dtype,
-            requirements=full_requirements(max_k_up=max_k, max_k_down=max_k),
-        )
-    ) as runtime:
-        yield runtime.grgs[0]
+    # max_k stays 20 explicitly: _K_MATRIX goes up to 20, and testing.load's own
+    # default is 8, which would fail these with "k=20 exceeds max_k_up=8".
+    return testing.load_reference(artifact, dtype=dtype, max_k=max_k)
 
 
 def _expected(grg, matrix: np.ndarray, direction: pygrgl.TraversalDirection) -> np.ndarray:

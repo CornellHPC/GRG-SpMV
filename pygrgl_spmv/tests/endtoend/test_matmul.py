@@ -1,37 +1,27 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import subprocess
 
 import numpy as np
 import pygrgl
 import pytest
 
-from pygrgl_spmv import ReferenceRuntime
-from pygrgl_spmv.tests.runtime._runtime_builders import (
-    build_layout_for_backend,
-    build_reference_layout,
-    full_requirements,
-    nonreference_backend_cases,
-    runtime_cls_for_backend,
-)
+from pygrgl_spmv import testing
+from pygrgl_spmv.tests.runtime._runtime_builders import nonreference_backend_cases
 
 from .conftest import grg_to_matrix
 
 
-@contextmanager
 def _open_reference_grg(artifact, *, max_k: int):
-    with ReferenceRuntime(build_reference_layout([artifact], requirements=full_requirements(max_k_up=max_k, max_k_down=max_k))) as runtime:
-        yield runtime.grgs[0]
+    return testing.load_reference(artifact, max_k=max_k)
 
 
-@contextmanager
 def _open_backend_grg(backend_name: str, artifact, *, k: int):
-    requirements = full_requirements(max_k_up=k, max_k_down=k)
-    layout = build_layout_for_backend(backend_name, [artifact], requirements=requirements)
-    runtime_cls = runtime_cls_for_backend(backend_name)
-    with runtime_cls(layout) as runtime:
-        yield runtime.grgs[0]
+    # n_threads pinned so the thread count does not follow the host's core count. No
+    # VRAM budget: allow_residency=True zeroes it in the adaptor, so any value here
+    # is a no-op -- reaching the budget-fitting path needs allow_residency=False.
+    extra = {"n_threads": 1} if backend_name == "mkl" else {}
+    return testing.load(artifact, backend=backend_name, max_k=k, **extra)
 
 
 def _direction_helper(grg: pygrgl.GRG, op, direction: pygrgl.TraversalDirection, *, rows: int):

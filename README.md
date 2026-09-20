@@ -179,6 +179,47 @@ with CusparseRuntime(layout) as runtime:
   - `pygrgl_spmv.backends.cusparse`
 - GPU execution is centered on `grg.prepare_matmul_cuda(...)`; eager `grg.matmul(...)` is a NumPy convenience wrapper over that prepared path
 
+## Testing Against pygrgl-spmv
+
+If your own test suite needs to run against our backends, `pygrgl_spmv.testing` ships helpers so you don't have to hand-roll planner and runtime setup. It is importable without `pytest`.
+
+```python
+import pytest
+from pygrgl_spmv import testing as spmv_test
+
+@pytest.fixture(scope="session")
+def artifact(tmp_path_factory):
+    return spmv_test.artifact_for("chr1.grg", tmp_path_factory.mktemp("artifacts"))
+
+@pytest.fixture(params=spmv_test.available_backends(), ids=lambda b: b)
+def grg(request, artifact):
+    with spmv_test.load(artifact, backend=request.param, max_k=4) as g:
+        yield g          # the fixture's teardown owns the runtime's lifetime
+```
+
+`unittest` works the same way via `TestCase.enterContext`:
+
+```python
+grg = self.enterContext(spmv_test.load(artifact, backend=backend, max_k=4))
+```
+
+| Function | Purpose |
+|---|---|
+| `available_backends()` | Backends usable in this process, e.g. `("reference", "mkl", "cusparse")`. Parameterize over this instead of writing per-backend `skipif`s. |
+| `is_mkl_available()`, `is_cusparse_available()`, `is_available(backend)` | Individual predicates. Cached, and deliberately fork-safe — they do not initialise the CUDA driver, so `multiprocessing` in a consumer's suite keeps working. Set `PYGRGL_SPMV_DISABLE_GPU=1` to force CPU-only, at any point. |
+| `artifact_for(grg_path, out_dir, *, dtype)` | Convert a `.grg` for use in tests. A separate call from `load()` on purpose, so conversion stays visible; it does not cache, so call it from a session-scoped fixture. Names the artifact from the input's basename, so distinct sources need distinct `out_dir`s. |
+| `requirements(*, max_k=..., **fields)` | An everything-enabled `RuntimeRequirements`. Keyword names mirror the dataclass field for field. |
+| `load(artifact, *, backend, req, max_k, dtype, **kw)` | Context manager yielding one bound GRG. `load_reference` / `load_mkl` / `load_cusparse` are pinned shorthands. |
+| `load_many(artifacts, *, backend, ...)` | Context manager yielding one bound GRG per artifact, in order. |
+
+Backend-specific arguments go through `**kw` to the matching `make_backend_*` factory — `capture`, `native`, `device`, `allow_residency`, `vram_budget_mb` for cuSPARSE, `n_threads` and `optimize` for MKL, `plans` for reference. Passing one to a backend that cannot honour it raises `TypeError` rather than being ignored.
+
+`capture=True` with only `max_k` captures just the default up/down pair. For a real application shape pass `req=make_runconfig_pca()` (or `_bolt` / `_gwas` / `_kernel`); otherwise a call like `by_individual=True` has no graph and raises.
+
+There is no `exit_stack` parameter: the loaders are context managers, and your test framework already owns the stack. Do not use a GRG after its `with` block — for captured (CUDA-graph) GRGs the underlying buffers are freed on exit, and calling `matmul` afterwards raises.
+
+`reference` is a pure NumPy/SciPy backend, always available, and is the parity oracle the others are checked against — useful as the expected value in your own tests.
+
 ### Notes
 
 - planners and runtimes consume `.grg_spmv` artifacts only

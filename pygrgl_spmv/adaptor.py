@@ -50,6 +50,24 @@ class CapturedBoundGRG:
         # Serializes matmul() across all GRGs sharing a device; nullcontext when
         # no lock is supplied so matmul stays branch-free.
         self._device_lock = device_lock if device_lock is not None else contextlib.nullcontext()
+        self._closed = False
+
+    def _invalidate(self) -> None:
+        """Mark this GRG dead once its owning runtime is torn down.
+
+        Registered on the loader's ExitStack. Unlike the eager path, graph replay
+        does not go through the runtime's _call_scope(), so nothing else would
+        notice that the buffers the graph holds pointers into have been freed.
+
+        Under the lock, so teardown waits for an in-flight replay instead of
+        freeing underneath it. Clearing the dicts is what releases the graph pools
+        and staging arenas; a retained handle would otherwise pin them.
+        """
+        with self._device_lock:
+            self._closed = True
+            for owned in (self._graphs, self._src_tensors, self._init_tensors,
+                          self._miss_tensors, self._prepared_ops):
+                owned.clear()
 
     @property
     def use_cupy(self):
@@ -236,6 +254,17 @@ class CapturedBoundGRG:
         #TODO: support emit all nodes
 
         with self._device_lock:
+            # Inside the lock: _invalidate() takes the same one, which is what makes
+            # teardown and replay mutually exclusive.
+            if self._closed:
+                raise RuntimeError(
+                    "CapturedBoundGRG.matmul() called after its runtime was released. "
+                    "The captured CUDA graphs hold raw pointers into buffers that have "
+                    "been freed, so replaying would read and write recycled memory. Keep "
+                    "the loading context manager (or ExitStack) open for as long as the "
+                    "GRG is in use."
+                )
+
             if init is None:
                 init_mode, init_payload = "none", None
             elif isinstance(init, str):
@@ -959,10 +988,17 @@ def _capture_grg(grg, capture_stream, req, cfg, stack, device_lock=None) -> Capt
         src_tensors[key] = src
         graphs[key] = graph
 
-    return CapturedBoundGRG(
+    captured = CapturedBoundGRG(
         grg, prepared_ops, graphs, src_tensors, init_tensors, miss_tensors,
         capture_stream, native=cfg.native, device_lock=device_lock,
     )
+    # Pushed last so LIFO unwinding fires it first: the GRG must be marked dead
+    # before the prepared-op contexts and the runtime below it are torn down.
+    # Without this, replaying after the stack closes runs kernels against
+    # destroyed cuSPARSE descriptors and recycled pool memory, silently
+    # corrupting whatever else was handed those addresses.
+    stack.callback(captured._invalidate)
+    return captured
 
 
 # ---------------------------------------------------------------------------
