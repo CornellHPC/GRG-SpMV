@@ -16,13 +16,13 @@ from pygrgl_spmv.grg import _build_init_biases
 from pygrgl_spmv.grg.artifact import save_grg_spmv
 from pygrgl_spmv.grg.compile import CompiledOperatorState
 from pygrgl_spmv.grg.sparse import binary_csr_from_parts
-from pygrgl_spmv.tests.runtime._runtime_builders import build_cusparse_layout, build_triton_layout
+from pygrgl_spmv.tests.runtime._runtime_builders import build_cusparse_layout
 
 _DENSITY_DEN = 100
 # This is a streamed-stress fixture restriction, not a runtime rule. Keeping the
 # synthetic owner blocks below the int32/int64 structural cliff avoids coupling
 # artifact size, stored dtype, and planner byte thresholds in a way that is easy
-# to get subtly wrong, and it lets Triton and cuSPARSE share the same artifact.
+# to get subtly wrong, and it keeps one artifact shape for every streamed case.
 _GPU_STRESS_NNZ_CAP = 1 << 30
 
 
@@ -56,16 +56,6 @@ def clear_cupy_state() -> None:
     cp.cuda.runtime.deviceSynchronize()
     cp.get_default_memory_pool().free_all_blocks()
     cp.get_default_pinned_memory_pool().free_all_blocks()
-    gc.collect()
-
-
-def clear_torch_state() -> None:
-    gc.collect()
-    import torch
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
     gc.collect()
 
 
@@ -152,19 +142,6 @@ def _prepare_stream_stress_case(*, backend_name: str, total_vram_bytes: int) -> 
         total_vram_bytes=int(total_vram_bytes),
         available_host_bytes=int(available_host_bytes),
         shifts=(0, int(bandwidth), 2 * int(bandwidth)),
-    )
-
-
-@functools.cache
-def prepare_triton_stream_stress_case() -> StreamStressCase:
-    import torch
-
-    clear_torch_state()
-    with torch.cuda.device(0):
-        _, total_vram_bytes = (int(v) for v in torch.cuda.mem_get_info())
-    return _prepare_stream_stress_case(
-        backend_name="triton",
-        total_vram_bytes=total_vram_bytes,
     )
 
 
@@ -458,22 +435,6 @@ def three_block_mode_budget_bytes(mode: ThreeBlockMode, *, fixed_bytes: int, blo
     return int(fixed_bytes + int(mode.budget_blocks) * int(block_bytes))
 
 
-def triton_ring_thresholds(
-    artifact_path: Path,
-    *,
-    requirements,
-    total_vram_bytes: int,
-    max_ring_buffer_size: int,
-) -> tuple[int, ...]:
-    layout = build_triton_layout(
-        [artifact_path],
-        requirements=requirements,
-        ring_buffer_size=0,
-        vram_budget_bytes=max(int(total_vram_bytes) * 4, 1),
-    )
-    return _stream_thresholds_from_layout(layout, max_ring_buffer_size=int(max_ring_buffer_size))
-
-
 def cusparse_ring_thresholds(
     artifact_path: Path,
     *,
@@ -533,14 +494,11 @@ __all__ = [
     "ThreeBlockMode",
     "_equal_block_budget_components",
     "clear_cupy_state",
-    "clear_torch_state",
     "cusparse_ring_thresholds",
     "expected_down",
     "expected_up",
     "prepare_cusparse_stream_stress_case",
-    "prepare_triton_stream_stress_case",
     "three_block_mode_budget_bytes",
-    "triton_ring_thresholds",
     "write_three_level_band_artifact",
     "write_overlap_band_artifact",
 ]

@@ -9,7 +9,6 @@ from pygrgl_spmv.backends._cuda_stream import parse_cuda_device, parse_cuda_stre
 from pygrgl_spmv.backends.cusparse.plan import CusparsePlan, CusparsePlanPair, DenseOrder, Operation, SpMMAlgorithm
 from pygrgl_spmv.backends.mkl import MklPlan, MklPlanPair
 from pygrgl_spmv.backends.reference import ReferencePlan, ReferencePlanPair
-from pygrgl_spmv.backends.triton.plan import TritonPlan, TritonPlanPair
 from pygrgl_spmv.backends.types import SparseFormat, StoredMatrix
 
 
@@ -164,33 +163,6 @@ def test_mkl_plan_from_dict_and_storage_sharing():
         MklPlan.from_dict({"store": "N", "fmt": "CSR", "n_thread": 4})
     with pytest.raises(ValueError, match="at least one"):
         MklPlanPair(plan_up=None, plan_down=None)
-
-
-def test_triton_plan_scratch_normalization():
-    plan = TritonPlan.from_dict({"store": "N", "fmt": "CSR", "scratch": "3|1|2"})
-    assert plan.store == StoredMatrix.N
-    assert plan.fmt == SparseFormat.CSR
-    assert plan.scratch == "1|2|3"
-
-
-@pytest.mark.parametrize(
-    ("raw", "match"),
-    [
-        pytest.param({"store": "N", "fmt": "COO"}, "CSR/CSC", id="coo-format"),
-        pytest.param({"store": "N", "fmt": "CSR", "scratch": "1||2"}, "invalid Triton scratch", id="bad-scratch-empty"),
-        pytest.param({"store": "N", "fmt": "CSR", "scratch": "1|1"}, "duplicate Triton scratch", id="bad-scratch-dup"),
-    ],
-)
-def test_triton_plan_rejects_invalid_values(raw, match):
-    with pytest.raises(ValueError, match=match):
-        TritonPlan.from_dict(raw)
-
-
-def test_triton_plan_pair_validates_store_direction():
-    with pytest.raises(ValueError, match="plan_up expects store=N"):
-        TritonPlanPair.from_dicts({"store": "T", "fmt": "CSC"}, None)
-    with pytest.raises(ValueError, match="plan_down expects store=T"):
-        TritonPlanPair.from_dicts(None, {"store": "N", "fmt": "CSR"})
 
 
 def test_cusparse_plan_parse_and_properties():

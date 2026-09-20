@@ -37,26 +37,15 @@ def _has_cusparse_runtime() -> bool:
         return False
 
 
-def _has_triton_runtime() -> bool:
-    try:
-        import torch
-        import triton  # noqa: F401
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
-
-
 HAS_MKL_RUNTIME = _has_mkl_runtime()
 HAS_CUSPARSE_RUNTIME = _has_cusparse_runtime()
-HAS_TRITON_RUNTIME = _has_triton_runtime()
 
 
 def pytest_addoption(parser):
     parser.addoption(
         "--backend",
         default="all",
-        choices=["mkl", "cusparse", "triton", "all"],
+        choices=["mkl", "cusparse", "all"],
         help="Which backend-specific tests to include; shared/reference tests always run.",
     )
     parser.addoption(
@@ -87,17 +76,12 @@ def pytest_collection_modifyitems(config, items):
         case "mkl":
             skip = pytest.mark.skip(reason="--backend=mkl")
             for item in items:
-                if "cusparse" in item.keywords or "triton" in item.keywords or "gpu" in item.keywords:
+                if "cusparse" in item.keywords or "gpu" in item.keywords:
                     item.add_marker(skip)
         case "cusparse":
             skip = pytest.mark.skip(reason="--backend=cusparse")
             for item in items:
-                if "mkl" in item.keywords or "triton" in item.keywords:
-                    item.add_marker(skip)
-        case "triton":
-            skip = pytest.mark.skip(reason="--backend=triton")
-            for item in items:
-                if "mkl" in item.keywords or "cusparse" in item.keywords:
+                if "mkl" in item.keywords:
                     item.add_marker(skip)
         case _:
             raise ValueError(f"unexpected --backend value {backend!r}")
@@ -114,12 +98,6 @@ def pytest_collection_modifyitems(config, items):
             if "cusparse" in item.keywords:
                 item.add_marker(skip)
 
-    if not HAS_TRITON_RUNTIME:
-        skip = pytest.mark.skip(reason="Triton runtime unavailable (torch + triton CUDA not found)")
-        for item in items:
-            if "triton" in item.keywords:
-                item.add_marker(skip)
-
     if not stress:
         skip = pytest.mark.skip(reason="stress tests require --stress")
         for item in items:
@@ -133,11 +111,6 @@ def tol(dtype) -> tuple[float, float]:
 
 def binary_pm1(rng: np.random.Generator, shape: tuple[int, ...], dtype) -> np.ndarray:
     return rng.choice(np.array([-1.0, 1.0], dtype=np.dtype(dtype)), size=shape)
-
-
-@pytest.fixture(scope="session")
-def backend_filter(request) -> str:
-    return str(request.config.getoption("--backend"))
 
 
 @pytest.fixture(scope="session")
@@ -183,14 +156,3 @@ def missing_artifact(missing_grg_path, artifact_cache_dir) -> Path:
     return convert(missing_grg_path, artifact_cache_dir)
 
 
-@pytest.fixture(autouse=True)
-def _disable_triton_autotune_for_tests(request, monkeypatch):
-    if "triton" not in request.keywords:
-        return
-    from pygrgl_spmv.backends.triton import TritonRuntime
-
-    monkeypatch.setattr(
-        TritonRuntime,
-        "_tune_direction",
-        lambda self, direction: self._candidate_configs(direction)[0],
-    )
