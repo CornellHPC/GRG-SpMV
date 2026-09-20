@@ -17,11 +17,9 @@ _BACKENDS = [
     pytest.param("reference", id="reference"),
     pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
     pytest.param("cusparse", id="cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse]),
-    pytest.param("triton", id="triton", marks=[pytest.mark.gpu, pytest.mark.triton]),
 ]
 _GPU_BACKENDS = [
     pytest.param("cusparse", id="cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse]),
-    pytest.param("triton", id="triton", marks=[pytest.mark.gpu, pytest.mark.triton]),
 ]
 
 
@@ -31,10 +29,6 @@ def _up_only_pair(backend_name: str):
             return ReferencePlanPair(plan_up=ReferencePlan(store="N", fmt="CSR"), plan_down=None)
         case "mkl":
             return MklPlanPair(plan_up=MklPlan(store="N", fmt="CSR", n_threads=1), plan_down=None)
-        case "triton":
-            from pygrgl_spmv.backends.triton import TritonPlan, TritonPlanPair
-
-            return TritonPlanPair(plan_up=TritonPlan(store="N", fmt="CSR", scratch="none"), plan_down=None)
         case "cusparse":
             from pygrgl_spmv.backends.cusparse import CusparsePlan, CusparsePlanPair
 
@@ -52,10 +46,6 @@ def _down_only_pair(backend_name: str):
             return ReferencePlanPair(plan_up=None, plan_down=ReferencePlan(store="T", fmt="CSC"))
         case "mkl":
             return MklPlanPair(plan_up=None, plan_down=MklPlan(store="T", fmt="CSC", n_threads=1))
-        case "triton":
-            from pygrgl_spmv.backends.triton import TritonPlan, TritonPlanPair
-
-            return TritonPlanPair(plan_up=None, plan_down=TritonPlan(store="T", fmt="CSC", scratch="none"))
         case "cusparse":
             from pygrgl_spmv.backends.cusparse import CusparsePlan, CusparsePlanPair
 
@@ -78,13 +68,6 @@ def _nonsharing_full_pair(backend_name: str):
             return MklPlanPair(
                 plan_up=MklPlan(store="N", fmt="CSR", n_threads=1),
                 plan_down=MklPlan(store="T", fmt="COO", n_threads=1),
-            )
-        case "triton":
-            from pygrgl_spmv.backends.triton import TritonPlan, TritonPlanPair
-
-            return TritonPlanPair(
-                plan_up=TritonPlan(store="N", fmt="CSR", scratch="none"),
-                plan_down=TritonPlan(store="T", fmt="CSR", scratch="none"),
             )
         case "cusparse":
             from pygrgl_spmv.backends.cusparse import CusparsePlan, CusparsePlanPair

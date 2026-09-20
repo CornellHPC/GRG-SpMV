@@ -18,7 +18,6 @@ def test_cpu_safe_import_surface_without_optional_gpu_modules():
                 if (
                     fullname == "cupy" or fullname.startswith("cupy.")
                     or fullname == "torch" or fullname.startswith("torch.")
-                    or fullname == "triton" or fullname.startswith("triton.")
                 ):
                     raise ModuleNotFoundError(fullname)
                 return None
@@ -33,9 +32,7 @@ def test_cpu_safe_import_surface_without_optional_gpu_modules():
             json.dumps(
                 {
                     "root_has_cusparse": hasattr(pygrgl_spmv, "CusparseRuntime"),
-                    "root_has_triton": hasattr(pygrgl_spmv, "TritonRuntime"),
                     "backends_has_cusparse": hasattr(backends, "CusparseRuntime"),
-                    "backends_has_triton": hasattr(backends, "TritonRuntime"),
                 }
             )
         )
@@ -45,7 +42,5 @@ def test_cpu_safe_import_surface_without_optional_gpu_modules():
     payload = json.loads(result.stdout)
     assert payload == {
         "root_has_cusparse": False,
-        "root_has_triton": False,
         "backends_has_cusparse": False,
-        "backends_has_triton": False,
     }

@@ -167,7 +167,6 @@ with CusparseRuntime(layout) as runtime:
   - `plan_reference_layout(...)`, `ReferenceRuntime`
   - `plan_mkl_layout(...)`, `MklRuntime`
 - GPU backends are imported from their subpackages:
-  - `pygrgl_spmv.backends.triton`
   - `pygrgl_spmv.backends.cusparse`
 - GPU execution is centered on `grg.prepare_matmul_cuda(...)`; eager `grg.matmul(...)` is a NumPy convenience wrapper over that prepared path
 
@@ -177,7 +176,7 @@ with CusparseRuntime(layout) as runtime:
 - runtime-owned buffers are allocated in `__enter__()`
 - one runtime owns one shared execution arena across all `runtime.grgs`
 - concurrent calls on one runtime fail fast
-- Triton and cuSPARSE support declared `max_k >= 1`
+- cuSPARSE supports any declared `max_k >= 1`
 - GPU layouts can mix resident and streamed sparse blocks under a VRAM budget
 - `ring_buffer_size=0` is valid for GPU layouts only when the budget keeps every sparse block resident
 - the package root intentionally stays CPU-safe and does not re-export GPU runtime symbols

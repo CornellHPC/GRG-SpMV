@@ -5,7 +5,8 @@ import pygrgl
 import pytest
 
 from pygrgl_spmv.backends.types import InitMode
-from pygrgl_spmv.tests.conftest import DATA_DTYPE, HAS_MKL_RUNTIME, tol
+from pygrgl_spmv.testing import is_mkl_available
+from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
 from pygrgl_spmv.tests.runtime._runtime_builders import (
     build_layout_for_backend,
     full_requirements,
@@ -13,7 +14,6 @@ from pygrgl_spmv.tests.runtime._runtime_builders import (
 )
 
 _GPU_BACKENDS = (
-    pytest.param("triton", marks=[pytest.mark.gpu, pytest.mark.triton], id="triton"),
     pytest.param("cusparse", marks=[pytest.mark.gpu, pytest.mark.cusparse], id="cusparse"),
 )
 _DIRECTIONS = (
@@ -111,7 +111,7 @@ def _run_prepared(
     ),
 )
 def test_cpu_backends_reject_prepare_matmul_cuda(primary_artifact, backend_name):
-    if backend_name == "mkl" and not HAS_MKL_RUNTIME:
+    if backend_name == "mkl" and not is_mkl_available():
         pytest.skip("MKL runtime unavailable")
     layout = build_layout_for_backend(backend_name, [primary_artifact], requirements=full_requirements(max_k_up=2, max_k_down=2))
     runtime_cls = runtime_cls_for_backend(backend_name)
