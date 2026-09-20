@@ -118,8 +118,14 @@ Run configurations carry the `RuntimeRequirements` for an application, which dec
 | `make_runconfig_gwas` | GWAS | `maxk`, `sample_variance` |
 
 `force_spmm=False` captures at `k=1` (the SpMV path); `True` captures at `k=2` (SpMM). Either way `k=1` callers still work — `CapturedBoundGRG.matmul()` zero-pads and truncates.
-**When you're forced to use an earlier CUDA version, setting `force_spmm=True` can ensure correctness, at the cost of significant performance degradation.**
+**When you're forced to use an earlier CUDA version, setting `force_spmm=True` can ensure correctness, at the cost of significant performance degradation.** Note that `force_spmm` only has an effect when `maxk == 1`: at `maxk >= 2` the SpMM path is already in use, so the capture widths are identical either way.
+
 For GWAS with covariates set `maxk = n_covariates + 1` so the `X^T Q` product fits, and set `sample_variance=False` for the binomial-variance-only workload, which drops the `diag(X^T X)` graph.
+
+Each factory captures a fixed set of graphs, and **a call whose shape was not captured raises `ValueError`** naming both the requested and the available keys. It does not fall back to a different graph. If you hit that error, either use the run configuration that matches your application or add the missing `CaptureSpec` (together with the matching `need_*` flag on its `RuntimeRequirements`). Two consequences worth knowing:
+
+- `make_runconfig_pca()` captures at `k=1`, so any solver whose block size *is* `k` needs an explicit `make_runconfig_pca(maxk=k)`.
+- `make_runconfig_pca()` declares neither `need_init_vector` nor `need_init_xtx`, because no PCA path passes an array init and `grapp.util.simple.variance()` is a `custom_variance` you supply yourself. If you do supply one, add `CaptureSpec("up", k, init_mode="xtx")` and `need_init_xtx=True` to the PCA configuration — not `make_runconfig_gwas()`, which captures no DOWN graph and so cannot serve an eigensolver's reverse product.
 
 ## Advanced Usage
 
