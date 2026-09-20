@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -103,6 +104,36 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "stress" in item.keywords:
                 item.add_marker(skip)
+
+
+@dataclass(frozen=True)
+class GrgFixture:
+    """One (name, grg path, loaded grg, converted artifact) bundle."""
+
+    name: str
+    path: str
+    grg: object
+    artifact: Path
+
+
+@pytest.fixture(params=["msprime", "missing"])
+def any_grg(request) -> GrgFixture:
+    """Run a structural test on both fixtures, not just the trivial one.
+
+    ``msprime.example`` is 2 levels with a single non-empty block, so every
+    per-(level, block) invariant is trivially satisfied on it -- that is how the
+    cuSPARSE DOWN ``ext_scratch`` index reversal survived for so long.
+    ``test-200-samples.miss`` is 20 levels with 81 non-empty blocks and carries
+    missingness, so it can actually express an ordering mismatch.
+
+    Resolved lazily: declaring all six as parameters let a missing --missing-grg
+    skip the *msprime* param too, silently zeroing both halves.
+    """
+    prefix = "primary" if request.param == "msprime" else "missing"
+    return GrgFixture(
+        request.param,
+        *(request.getfixturevalue(f"{prefix}_{name}") for name in ("grg_path", "grg", "artifact")),
+    )
 
 
 def tol(dtype) -> tuple[float, float]:

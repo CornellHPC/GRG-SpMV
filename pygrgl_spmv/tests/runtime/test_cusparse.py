@@ -1117,9 +1117,13 @@ def test_cusparse_shared_ones_plan_modes(primary_artifact, monkeypatch, mode, al
 
 
 @pytest.mark.parametrize("runtime_k", [1, 2], ids=["k1", "k2"])
-def test_cusparse_scratch_enabled_up_matches_reference(primary_artifact, primary_grg, runtime_k):
+# A numeric token is the only way to get a *partial* per-level scratch mask, which is
+# the case the per-level sizing walk was rewritten for and had no coverage of.
+@pytest.mark.parametrize("scratch", ["all", "1"], ids=["scratch-all", "scratch-level1"])
+def test_cusparse_scratch_enabled_up_matches_reference(any_grg, runtime_k, scratch):
+    primary_artifact, primary_grg = any_grg.artifact, any_grg.grg
     pair = CusparsePlanPair(
-        plan_up=CusparsePlan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT", scratch="1"),
+        plan_up=CusparsePlan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT", scratch=scratch),
         plan_down=None,
     )
     layout = build_cusparse_layout([primary_artifact], pair=pair, requirements=_requirements(runtime_k))
@@ -1132,10 +1136,15 @@ def test_cusparse_scratch_enabled_up_matches_reference(primary_artifact, primary
 
 
 @pytest.mark.parametrize("runtime_k", [1, 2], ids=["k1", "k2"])
-def test_cusparse_scratch_enabled_down_matches_reference(primary_artifact, primary_grg, runtime_k):
+# DOWN needs the partial mask more than UP does: the index reversal these tests were
+# written for lived in this direction, and only a numeric token exercises a plan where
+# some levels use ext_scratch and others ext_main.
+@pytest.mark.parametrize("scratch", ["all", "0"], ids=["scratch-all", "scratch-level0"])
+def test_cusparse_scratch_enabled_down_matches_reference(any_grg, runtime_k, scratch):
+    primary_artifact, primary_grg = any_grg.artifact, any_grg.grg
     pair = CusparsePlanPair(
         plan_up=None,
-        plan_down=CusparsePlan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT", scratch="0"),
+        plan_down=CusparsePlan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT", scratch=scratch),
     )
     layout = build_cusparse_layout([primary_artifact], pair=pair, requirements=_requirements(runtime_k))
     with CusparseRuntime(layout) as runtime:
@@ -1144,6 +1153,67 @@ def test_cusparse_scratch_enabled_down_matches_reference(primary_artifact, prima
         x = rng.standard_normal((runtime_k, primary_grg.num_mutations), dtype=DATA_DTYPE)
         atol, rtol = tol(DATA_DTYPE)
         np.testing.assert_allclose(grg.matmul(x, "down"), np.asarray(pygrgl.matmul(primary_grg, x, pygrgl.TraversalDirection.DOWN)), atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("direction", ["up", "down"])
+def test_cusparse_scratch_external_buffers_are_not_overrun(any_grg, direction):
+    """Guard-region canary on every per-op cuSPARSE external workspace.
+
+    Comparing results against a reference cannot catch an undersized external
+    workspace: cuSPARSE writes past the end into whatever the pool put next and
+    still returns the right numbers. _query_spmm_buffer_sizes walks query_blocks
+    in artifact order (ascending parent level) while _build_ops assigns op_idx
+    via iter_direction_level_pairs, which for DOWN is the exact reverse -- so a
+    per-slot size would be handed to a different op than the one it was measured
+    for. Only a canary sees that.
+    """
+    guard, sentinel = 4096, 0xAB
+    plan = CusparsePlan(
+        store="N" if direction == "up" else "T",
+        fmt="CSR" if direction == "up" else "CSC",
+        op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT", scratch="all",
+    )
+    pair = CusparsePlanPair(
+        plan_up=plan if direction == "up" else None,
+        plan_down=None if direction == "up" else plan,
+    )
+    layout = build_cusparse_layout([any_grg.artifact], pair=pair, requirements=_requirements(2))
+    with CusparseRuntime(layout) as runtime:
+        (grg,) = runtime.grgs
+        table = runtime._ext_scratch_up if direction == "up" else runtime._ext_scratch_down
+        watched = {}
+        for level, row in enumerate(table):
+            for op_idx, buf in enumerate(row):
+                if buf is None:
+                    continue
+                nbytes = int(buf.nbytes)
+                padded = cp.full((nbytes + guard,), sentinel, dtype=cp.uint8)
+                watched[(level, op_idx)] = (padded, nbytes)
+                row[op_idx] = padded[:nbytes]
+        assert watched, "fixture produced no scratch buffers; the test would be vacuous"
+
+        cols = any_grg.grg.num_samples if direction == "up" else any_grg.grg.num_mutations
+        rng = np.random.default_rng(4242)
+        x = rng.standard_normal((2, cols), dtype=DATA_DTYPE)
+        got = grg.matmul(x, direction)
+        cp.cuda.Device(layout.device).synchronize()
+
+        overruns = {
+            key: int(cp.count_nonzero(padded[nbytes:] != sentinel))
+            for key, (padded, nbytes) in watched.items()
+        }
+        bad = {key: n for key, n in overruns.items() if n}
+        assert not bad, (
+            f"{len(bad)}/{len(watched)} cuSPARSE {direction} external scratch buffers "
+            f"were written past their planned end: {sorted(bad.items())[:5]}"
+        )
+
+        expected = np.asarray(pygrgl.matmul(
+            any_grg.grg, x,
+            pygrgl.TraversalDirection.UP if direction == "up" else pygrgl.TraversalDirection.DOWN,
+        ))
+        atol, rtol = tol(DATA_DTYPE)
+        np.testing.assert_allclose(got, expected, atol=atol, rtol=rtol)
 
 
 def test_cusparse_f_order_input(primary_artifact, primary_grg):
