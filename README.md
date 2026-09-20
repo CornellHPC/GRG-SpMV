@@ -58,14 +58,21 @@ The adaptor hides planning, layout and runtime setup for user behind three calls
 The loaded GRG artifacts are then ready for execution with `grapp`.
 A minimal example utilizing GPU (cuSparse) backend with pca: 
 
+This needs `grapp`, which is not pulled in by `pip install .` or `.[gpu]` — install it separately, or use the `dev` extra.
+
 ```python
 from contextlib import ExitStack
 
 from pygrgl_spmv import make_backend_cusparse, make_runconfig_pca, load_grg_spmv_multi
-from grapp.grg_calculator import GRGSpMVCalculator
+# grapp.linalg first: importing grapp.grg_calculator ahead of it hits a circular
+# import inside grapp (grg_calculator -> util -> util.simple -> grg_calculator).
 from grapp.linalg import PCs
+from grapp.grg_calculator import GRGSpMVCalculator
 
-backend = make_backend_cusparse(device=0)   # or make_backend_mkl(n_threads=0)
+artifacts = ["artifacts/chr1.grg_spmv", "artifacts/chr2.grg_spmv"]
+# capture=True is required for threads > 1: two artifacts on one device share one
+# runtime, and the eager path rejects concurrent calls on it.
+backend = make_backend_cusparse(device=0, capture=True)  # or make_backend_mkl(n_threads=0)
 req = make_runconfig_pca()                  # kernel / pca / bolt / gwas
 
 with ExitStack() as stack:
@@ -73,8 +80,43 @@ with ExitStack() as stack:
         GRGSpMVCalculator(g)
         for g in load_grg_spmv_multi(artifacts, backend, req, stack)
     ]
-    pcs_df, eig_vals = PCs(grgs, k=10, threads=4)
+    pcs_df = PCs(grgs, k=10, threads=4)
 ```
+
+`PCs` returns a DataFrame, and clamps `k` to the total mutation count. `include_eig=True` additionally returns the eigenvalues and eigenvectors, but it drives a width-`k` product, so it needs `make_runconfig_pca(maxk=k)` and a `k` strictly below the mutation count.
+
+The same three steps drive grapp's other entry points; only the run configuration changes. Summary statistics need `make_runconfig_gwas()`, whose captured set includes the missingness-carrying UP product:
+
+```python
+from pygrgl_spmv import make_backend_cusparse, make_runconfig_gwas, load_grg_spmv_single
+from grapp.util import allele_counts, allele_frequencies
+from grapp.grg_calculator import GRGSpMVCalculator
+
+backend = make_backend_cusparse(device=0, capture=True)
+
+with ExitStack() as stack:
+    grg = GRGSpMVCalculator(
+        load_grg_spmv_single("artifacts/chr1.grg_spmv", backend, make_runconfig_gwas(), stack)
+    )
+    freqs = allele_frequencies(grg, adjust_missing=True)
+    counts, missing = allele_counts(grg, return_missing=True)
+```
+
+Single-variant association uses the same configuration; the phenotype has one entry per individual:
+
+```python
+import numpy as np
+from grapp.assoc import linear_assoc_no_covar
+
+with ExitStack() as stack:
+    grg = GRGSpMVCalculator(
+        load_grg_spmv_single("artifacts/chr1.grg_spmv", backend, make_runconfig_gwas(), stack)
+    )
+    Y = np.asarray(phenotype, dtype=np.float64)     # shape (grg.num_individuals,)
+    results = linear_assoc_no_covar(grg, Y)
+```
+
+For covariate GWAS set `make_runconfig_gwas(maxk=n_covariates + 1)` so the `X^T Q` product fits. BOLT-LMM uses `make_runconfig_bolt()`.
 
 ### Supported Backends and Parameters
 
