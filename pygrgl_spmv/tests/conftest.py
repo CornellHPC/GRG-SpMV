@@ -9,7 +9,7 @@ import numpy as np
 import pygrgl
 import pytest
 from pygrgl_spmv import simple_convert
-from pygrgl_spmv.testing import is_cusparse_available, is_mkl_available
+from pygrgl_spmv.testing import BACKENDS, is_available
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PRIMARY_GRG = str(REPO_ROOT / "pygrgl_spmv" / "tests" / "data" / "msprime.example.igd.final.grg")
@@ -22,7 +22,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--backend",
         default="all",
-        choices=["mkl", "cusparse", "all"],
+        choices=[*BACKENDS, "all"],
         help="Which backend-specific tests to include; shared/reference tests always run.",
     )
     parser.addoption(
@@ -47,37 +47,20 @@ def pytest_collection_modifyitems(config, items):
     backend = str(config.getoption("--backend"))
     stress = bool(config.getoption("--stress"))
 
-    match backend:
-        case "all":
-            pass
-        case "mkl":
-            skip = pytest.mark.skip(reason="--backend=mkl")
-            for item in items:
-                if "cusparse" in item.keywords or "cuda13" in item.keywords:
-                    item.add_marker(skip)
-        case "cusparse":
-            skip = pytest.mark.skip(reason="--backend=cusparse")
-            for item in items:
-                if "mkl" in item.keywords:
-                    item.add_marker(skip)
-        case _:
-            raise ValueError(f"unexpected --backend value {backend!r}")
-
-    # The shipped predicates rather than hand-rolled probes: the suite's old cuSPARSE
-    # probe called cuInit, leaving every forked child unable to use CUDA. Called here
-    # rather than at module scope because the cuSPARSE one imports torch and cupy
-    # (~1.4 s), which --backend=mkl then never pays for.
-    if not is_mkl_available():
-        skip = pytest.mark.skip(reason="MKL runtime unavailable (libmkl_rt.so not found)")
-        for item in items:
-            if "mkl" in item.keywords:
-                item.add_marker(skip)
-
-    if backend != "mkl" and not is_cusparse_available():
-        skip = pytest.mark.skip(reason="cuSPARSE runtime unavailable (CuPy + CUDA not found)")
-        for item in items:
-            if "cusparse" in item.keywords:
-                item.add_marker(skip)
+    availability = {
+        name: is_available(name) for name in BACKENDS
+        if backend in {"all", name}
+    }
+    if backend != "all" and not availability[backend]:
+        raise pytest.UsageError(f"--backend={backend} explicitly requested but {backend} is unavailable")
+    for item in items:
+        for name in BACKENDS:
+            if item.get_closest_marker(name) is None:
+                continue
+            if backend not in {"all", name}:
+                item.add_marker(pytest.mark.skip(reason=f"{name} excluded by --backend={backend}"))
+            elif not availability[name]:
+                item.add_marker(pytest.mark.skip(reason=f"{name} unavailable"))
 
     if not stress:
         skip = pytest.mark.skip(reason="stress tests require --stress")

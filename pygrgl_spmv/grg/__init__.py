@@ -41,7 +41,7 @@ class RuntimeRequirements:
 
 
 @dataclass(frozen=True)
-class _CudaMatmulSpec:
+class _GpuMatmulSpec:
     direction: Direction
     k: int
     emit_all_nodes: bool
@@ -52,6 +52,10 @@ class _CudaMatmulSpec:
     input_cols: int
     output_cols: int
     apply_endpoint_bias: bool
+
+
+# Compatibility for callers using the original CUDA spec name.
+_CudaMatmulSpec = _GpuMatmulSpec
 
 
 def _decode_allele(data: np.ndarray, offsets: np.ndarray, idx: int) -> str:
@@ -451,7 +455,7 @@ class BoundGRG:
         reordered = node_values[self.inv_node_perm]
         return reordered.T.astype(self._dtype, copy=False)
 
-    def _prepare_cuda_spec(
+    def _prepare_gpu_spec(
         self,
         *,
         direction: str | Direction | pygrgl.TraversalDirection,
@@ -460,7 +464,7 @@ class BoundGRG:
         by_individual: bool,
         init_mode: str | InitMode,
         use_miss: bool,
-    ) -> _CudaMatmulSpec:
+    ) -> _GpuMatmulSpec:
         direction_name = self._parse_direction(direction)
         init_mode_name = parse_init_mode(init_mode)
         rows = int(k)
@@ -500,7 +504,7 @@ class BoundGRG:
             if emit_all_nodes or init_mode_name == InitMode.MATRIX
             else InitMode.NONE
         )
-        return _CudaMatmulSpec(
+        return _GpuMatmulSpec(
             direction=direction_name,
             k=rows,
             emit_all_nodes=bool(emit_all_nodes),
@@ -551,7 +555,7 @@ class BoundGRG:
         prepare = getattr(self._runtime, "_prepare_matmul_cuda", None)
         if prepare is None:
             raise NotImplementedError("prepare_matmul_cuda() is implemented only for CUDA backends")
-        spec = self._prepare_cuda_spec(
+        spec = self._prepare_gpu_spec(
             direction=direction,
             k=int(k),
             emit_all_nodes=bool(emit_all_nodes),
@@ -597,7 +601,7 @@ class BoundGRG:
 
         if getattr(self._runtime, "_prepare_matmul_cuda", None) is not None:
             init_mode, init_payload = self._parse_init(init, rows, x_in.dtype, reorder_matrix=False)
-            spec = self._prepare_cuda_spec(
+            spec = self._prepare_gpu_spec(
                 direction=direction_name,
                 k=rows,
                 emit_all_nodes=bool(emit_all_nodes),

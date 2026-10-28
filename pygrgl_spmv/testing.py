@@ -47,6 +47,8 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
+import subprocess
+import sys
 from numbers import Integral
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -62,6 +64,7 @@ __all__ = [
     "available_backends",
     "is_available",
     "is_cusparse_available",
+    "is_rocsparse_available",
     "is_mkl_available",
     "load",
     "load_cusparse",
@@ -74,7 +77,7 @@ __all__ = [
 #: Every backend this package can execute, in preference order. ``reference`` is
 #: a pure NumPy/SciPy implementation that is always available and is the parity
 #: oracle the other backends are checked against.
-BACKENDS = ("reference", "mkl", "cusparse")
+BACKENDS = ("reference", "mkl", "cusparse", "rocsparse")
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +134,9 @@ def _probe_cusparse() -> bool:
     surfaces as a baffling failure in an unrelated worker.
     """
     try:
-        import cupy  # noqa: F401
+        import cupy
+        if cupy.cuda.runtime.is_hip:
+            return False
         import torch
     except Exception:
         return False
@@ -141,10 +146,37 @@ def _probe_cusparse() -> bool:
         return False
 
 
+def is_rocsparse_available() -> bool:
+    """Whether HIP CuPy and rocSPARSE are usable, without initializing HIP here."""
+    if os.environ.get("PYGRGL_SPMV_DISABLE_GPU", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    return _probe_rocsparse()
+
+
+@functools.cache
+def _probe_rocsparse() -> bool:
+    # HIP initialization poisons forked children; isolate the device/library probe.
+    script = (
+        "import cupy as cp; "
+        "from pygrgl_spmv.backends.rocsparse.ffi import library; "
+        "raise SystemExit(0 if cp.cuda.runtime.is_hip "
+        "and cp.cuda.runtime.getDeviceCount() > 0 and library() else 1)"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script], timeout=30,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 _PREDICATES = {
     "reference": lambda: True,
     "mkl": is_mkl_available,
     "cusparse": is_cusparse_available,
+    "rocsparse": is_rocsparse_available,
 }
 
 

@@ -38,7 +38,7 @@ from pygrgl_spmv.backends.cusparse.ffi import (
     cuda_dtype,
 )
 from pygrgl_spmv.backends.types import Direction, InitMode, SparseFormat, StoredMatrix
-from pygrgl_spmv.grg import BoundGRG, RuntimeRequirements, _CudaMatmulSpec
+from pygrgl_spmv.grg import BoundGRG, RuntimeRequirements, _GpuMatmulSpec
 from pygrgl_spmv.grg.artifact import ArtifactScan, _load_grg_spmv_host, iter_artifact_blocks, scan_grg_spmv
 
 from .plan import CusparsePlan, CusparsePlanPair, DenseOrder, Operation
@@ -245,7 +245,7 @@ def _dense_entries(artifact: _CuArtifact, direction: Direction) -> dict[int, _Pr
 
 
 class _CusparsePreparedMatmul:
-    def __init__(self, runtime: "CusparseRuntime", artifact: _CuArtifact, spec: _CudaMatmulSpec) -> None:
+    def __init__(self, runtime: "CusparseRuntime", artifact: _CuArtifact, spec: _GpuMatmulSpec) -> None:
         self._runtime = runtime
         self._artifact = artifact
         self._spec = spec
@@ -1401,7 +1401,7 @@ class CusparseRuntime:
             )
             raise
 
-    def _prepare_matmul_cuda(self, grg: BoundGRG, spec: _CudaMatmulSpec) -> _CusparsePreparedMatmul:
+    def _prepare_matmul_cuda(self, grg: BoundGRG, spec: _GpuMatmulSpec) -> _CusparsePreparedMatmul:
         if spec.direction == Direction.UP and self.layout.pair.plan_up is None:
             raise ValueError("UP plan is not configured")
         if spec.direction == Direction.DOWN and self.layout.pair.plan_down is None:
@@ -1706,7 +1706,7 @@ class CusparseRuntime:
             for event in ready[:h]:
                 self._root_stream.wait_event(event)
 
-    def _seed_prepared(self, artifact: _CuArtifact, spec: _CudaMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
+    def _seed_prepared(self, artifact: _CuArtifact, spec: _GpuMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
         level_bufs = self._up_level_bufs if spec.direction == Direction.UP else self._down_level_bufs
         assert level_bufs
         k = int(spec.k)
@@ -1761,7 +1761,7 @@ class CusparseRuntime:
     def _apply_endpoint_bias_prepared(
         self,
         artifact: _CuArtifact,
-        spec: _CudaMatmulSpec,
+        spec: _GpuMatmulSpec,
         prepared: _CusparsePreparedMatmul,
         output,
     ) -> None:
@@ -1783,7 +1783,7 @@ class CusparseRuntime:
         temp *= prepared._init_vector_internal[None, :]
         output += temp
 
-    def _write_prepared_output(self, artifact: _CuArtifact, spec: _CudaMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
+    def _write_prepared_output(self, artifact: _CuArtifact, spec: _GpuMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
         level_bufs = self._up_level_bufs if spec.direction == Direction.UP else self._down_level_bufs
         assert level_bufs
         k = int(spec.k)
@@ -1835,7 +1835,7 @@ class CusparseRuntime:
                 self._cp.copyto(prepared._output_internal[: artifact.state.num_samples, :k], level_bufs[0][: artifact.state.num_samples, :k])
                 self._apply_endpoint_bias_prepared(artifact, spec, prepared, prepared._output_internal)
 
-    def _execute_prepared(self, artifact: _CuArtifact, spec: _CudaMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
+    def _execute_prepared(self, artifact: _CuArtifact, spec: _GpuMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
         dense = prepared._dense_state
         if dense is None:
             raise RuntimeError("cuSPARSE prepared matmul must be entered before use")

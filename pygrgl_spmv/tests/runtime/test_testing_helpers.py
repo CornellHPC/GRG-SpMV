@@ -8,9 +8,12 @@ availability probes, and a strict keyword allowlist.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import numpy as np
 import pygrgl
@@ -69,45 +72,113 @@ def test_importable_without_pytest_and_without_touching_gpu_modules():
 
     payload = json.loads(result.stdout)
     assert payload == {
-        "backends": ["reference", "mkl", "cusparse"],
+        "backends": ["reference", "mkl", "cusparse", "rocsparse"],
         "pytest_imported": False,
         "gpu_imported": [],
     }
 
 
-def test_availability_probes_do_not_initialise_the_cuda_driver():
-    """The probes must be fork-safe.
-
-    ``torch.cuda.is_available()`` and ``cupy.cuda.runtime.getDeviceCount()`` both
-    call ``cuInit``, after which a ``fork()``ed child cannot use CUDA at all --
-    even though no CUDA *context* exists. Shipping that would break any consumer
-    using multiprocessing's default start method.
-    """
+@pytest.mark.parametrize("backend", [
+    pytest.param(name, id=name, marks=getattr(pytest.mark, name))
+    for name in ("cusparse", "rocsparse")
+])
+def test_availability_probes_are_fork_safe(backend):
+    # A fresh parent prevents earlier numerical tests from initializing its driver.
     script = textwrap.dedent(
         """
-        import ctypes, json
+        import ctypes
+        import multiprocessing as mp
+        import sys
         from pygrgl_spmv import testing
-        available = testing.is_cusparse_available()
-        ctx = ctypes.c_void_p()
-        rc = ctypes.CDLL("libcuda.so.1").cuCtxGetCurrent(ctypes.byref(ctx))
-        print(json.dumps({"available": bool(available), "rc": int(rc)}))
+
+        backend = sys.argv[1]
+        assert testing.is_available(backend)
+        if backend == "cusparse":
+            ctx = ctypes.c_void_p()
+            rc = ctypes.CDLL("libcuda.so.1").cuCtxGetCurrent(ctypes.byref(ctx))
+            assert rc == 3, f"CUDA driver initialized by probe: {rc}"
+
+        def allocate():
+            import cupy as cp
+            assert float(cp.ones(4).sum()) == 4.0
+
+        child = mp.get_context("fork").Process(target=allocate)
+        child.start()
+        child.join(30)
+        if child.is_alive():
+            child.kill()
+            child.join()
+            raise AssertionError("first child allocation timed out")
+        assert child.exitcode == 0, child.exitcode
         """
     )
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-    if result.returncode != 0:
-        pytest.skip(f"could not probe the CUDA driver here: {result.stderr.strip()[:200]}")
-    import json
+    subprocess.run([sys.executable, "-c", script, backend], check=True, timeout=60)
 
-    payload = json.loads(result.stdout)
-    # 3 == CUDA_ERROR_NOT_INITIALIZED. Anything else means the probe called cuInit.
-    assert payload["rc"] == 3, f"is_cusparse_available() initialised the driver (rc={payload['rc']})"
+
+@pytest.mark.parametrize("outcome", [0, 1, "timeout", "missing"])
+def test_rocsparse_probe_failure_and_cache(monkeypatch, outcome):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[0] == sys.executable
+        assert kwargs["timeout"] == 30
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(command, 30)
+        if outcome == "missing":
+            raise OSError("interpreter unavailable")
+        return subprocess.CompletedProcess(command, outcome)
+
+    testing._probe_rocsparse.cache_clear()
+    monkeypatch.setattr(subprocess, "run", run)
+    try:
+        assert testing._probe_rocsparse() is (outcome == 0)
+        assert testing._probe_rocsparse() is (outcome == 0)
+        assert len(calls) == 1
+    finally:
+        testing._probe_rocsparse.cache_clear()
+
+
+@pytest.mark.parametrize("is_hip", [False, True])
+@pytest.mark.parametrize("count", [0, 1])
+def test_cusparse_probe_rejects_hip_cupy_before_device_count(monkeypatch, is_hip, count):
+    calls = []
+
+    def device_count():
+        calls.append(True)
+        return count
+
+    monkeypatch.setitem(sys.modules, "cupy", SimpleNamespace(
+        cuda=SimpleNamespace(runtime=SimpleNamespace(is_hip=is_hip))))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        cuda=SimpleNamespace(device_count=device_count)))
+    testing._probe_cusparse.cache_clear()
+    try:
+        assert testing._probe_cusparse() is (not is_hip and count > 0)
+        assert calls == ([] if is_hip else [True])
+    finally:
+        testing._probe_cusparse.cache_clear()
+
+
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_unavailable_backend_skips_by_default_but_explicit_selection_fails(backend):
+    node = f"{Path(__file__).resolve()}::test_load_yields_a_working_grg_on_every_backend[{backend}]"
+    command = [sys.executable, "-m", "pytest", "-q", node]
+    env = dict(os.environ, PYGRGL_SPMV_DISABLE_GPU="1")
+    optional = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+    assert optional.returncode == 0, optional.stdout + optional.stderr
+    assert "1 skipped" in optional.stdout
+    required = subprocess.run(command + [f"--backend={backend}"], env=env,
+                              capture_output=True, text=True, timeout=60)
+    assert required.returncode == 4, required.stdout + required.stderr
+    assert f"--backend={backend} explicitly requested" in required.stderr
 
 
 def test_is_available_dispatches_to_the_shipped_predicates(monkeypatch):
     """The identity form of this (`f() is f()` on bools) could not fail, and neither
     could comparing is_available("mkl") against the same function it dispatches to."""
     assert testing.is_available("reference") is True
-    for backend, predicate in (("mkl", "is_mkl_available"), ("cusparse", "is_cusparse_available")):
+    for backend in ("mkl", "cusparse", "rocsparse"):
         for answer in (True, False):
             monkeypatch.setitem(testing._PREDICATES, backend, lambda answer=answer: answer)
             assert testing.is_available(backend) is answer
@@ -117,13 +188,13 @@ def test_is_available_dispatches_to_the_shipped_predicates(monkeypatch):
         testing.is_available("triton")
 
 
-def test_the_gpu_probe_is_cached_but_the_env_check_is_not():
-    """_probe_cusparse carries the @cache; is_cusparse_available deliberately does
-    not, so the kill switch stays live. Asserting on __wrapped__ rather than on
-    bool identity, which is true either way."""
-    assert hasattr(testing._probe_cusparse, "cache_info")
-    assert not hasattr(testing.is_cusparse_available, "cache_info")
-    assert testing._probe_cusparse.cache_info().maxsize is None
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_the_gpu_probe_is_cached_but_the_env_check_is_not(backend):
+    probe = getattr(testing, f"_probe_{backend}")
+    available = getattr(testing, f"is_{backend}_available")
+    assert hasattr(probe, "cache_info")
+    assert not hasattr(available, "cache_info")
+    assert probe.cache_info().maxsize is None
 
 
 def test_available_backends_is_ordered_and_filterable():
@@ -136,22 +207,19 @@ def test_available_backends_is_ordered_and_filterable():
     )
 
 
-def test_gpu_probe_reads_the_disable_env_var_on_every_call(monkeypatch):
-    """The env read used to sit inside the @cache, so it was inert once anything had
-    probed, and needed cache_clear() here -- which only ever tested the cold path.
-    And "0" is a non-empty string, so the conventional 0/1 pair disabled the GPU.
-    """
-    monkeypatch.setenv("PYGRGL_SPMV_DISABLE_GPU", "1")
-    assert testing.is_cusparse_available() is False
-    assert "cusparse" not in testing.available_backends()
-
-    # Against the probe rather than True, so this also holds on a host with no GPU.
-    for off in ("0", "false", "no", ""):
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_gpu_probe_reads_the_disable_env_var_on_every_call(monkeypatch, backend):
+    available = getattr(testing, f"is_{backend}_available")
+    probe = getattr(testing, f"_probe_{backend}")
+    for on in ("1", "true", "yes", "on", " TRUE "):
+        monkeypatch.setenv("PYGRGL_SPMV_DISABLE_GPU", on)
+        assert available() is False
+        assert backend not in testing.available_backends()
+    for off in ("0", "false", "no", "off", ""):
         monkeypatch.setenv("PYGRGL_SPMV_DISABLE_GPU", off)
-        assert testing.is_cusparse_available() is testing._probe_cusparse()
-
+        assert available() is probe()
     monkeypatch.delenv("PYGRGL_SPMV_DISABLE_GPU")
-    assert testing.is_cusparse_available() is testing._probe_cusparse()
+    assert available() is probe()
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +276,7 @@ def _backend_params():
         pytest.param(
             name,
             id=name,
-            marks=[pytest.mark.cuda13, pytest.mark.cusparse] if name == "cusparse"
-            else ([pytest.mark.mkl] if name == "mkl" else []),
+            marks=() if name == "reference" else getattr(pytest.mark, name),
         )
         for name in testing.BACKENDS
     ]
@@ -261,7 +328,6 @@ def test_load_releases_resources_on_exit(primary_artifact):
         runtime._call_scope().__enter__()
 
 
-@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_captured_grg_refuses_to_replay_after_its_runtime_is_released(primary_artifact):
     """Post-close replay used to corrupt other allocations rather than fail."""

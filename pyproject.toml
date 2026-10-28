@@ -77,9 +77,9 @@ testpaths = [
 ]
 markers = [
     "stress: long streamed GPU stress tests",
-    "cuda13: tests requiring a CUDA 13 GPU (CuPy + cuSPARSE)",
     "mkl: tests specific to MKL backend",
     "cusparse: tests specific to cuSPARSE backend",
+    "rocsparse: tests specific to rocSPARSE backend",
 ]
 
 [tool.pyright]
