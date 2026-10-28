@@ -21,6 +21,7 @@ import pytest
 
 from pygrgl_spmv import testing
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
+from pygrgl_spmv.tests.runtime._gpu import GPU_BACKENDS
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +329,10 @@ def test_load_releases_resources_on_exit(primary_artifact):
         runtime._call_scope().__enter__()
 
 
-@pytest.mark.cusparse
-def test_captured_grg_refuses_to_replay_after_its_runtime_is_released(primary_artifact):
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
+def test_captured_grg_refuses_to_replay_after_its_runtime_is_released(primary_artifact, backend):
     """Post-close replay used to corrupt other allocations rather than fail."""
-    with testing.load(primary_artifact, backend="cusparse", max_k=2, capture=True) as grg:
+    with testing.load(primary_artifact, backend=backend, max_k=2, capture=True) as grg:
         ones = np.ones((1, grg.num_samples), dtype=DATA_DTYPE)
         assert float(grg.matmul(ones, "up").sum()) > 0
     with pytest.raises(RuntimeError, match="after its runtime was released"):

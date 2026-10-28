@@ -67,8 +67,6 @@ include = [
     "/pyproject.toml",
     "/README.md",
     "/LICENSE",
-    # README links into this; without it the sdist ships a dead link.
-    "/docs",
 ]
 exclude = [
     "/pygrgl_spmv/tests/**",

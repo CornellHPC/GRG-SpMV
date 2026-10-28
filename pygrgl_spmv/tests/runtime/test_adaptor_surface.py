@@ -100,14 +100,21 @@ def test_make_backend_gpu_normalizes_integer_devices(backend, device):
         pytest.param({"devcie": 0}, TypeError, "unexpected keyword", id="typo"),
     ],
 )
-def test_make_backend_cusparse_rejects_bad_arguments(kwargs, exc, match):
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_make_backend_gpu_rejects_bad_arguments(kwargs, exc, match, backend):
+    if backend == "rocsparse":
+        if "vram_budget_mb" in kwargs:
+            exc, match = TypeError, "unexpected keyword"
+        elif "allow_residency" in kwargs:
+            match = "streaming is unsupported"
     with pytest.raises(exc, match=match):
-        make_backend_cusparse(**kwargs)
+        backend_factory(backend)(**kwargs)
 
 
-def test_native_without_capture_is_ignored_not_an_error():
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_native_without_capture_is_ignored_not_an_error(backend):
     """Documented behaviour; the guard lives in the caller, not here."""
-    cfg = make_backend_cusparse(native=True)
+    cfg = backend_factory(backend)(native=True)
     assert cfg.native is True and cfg.capture is False
 
 
@@ -325,23 +332,23 @@ def test_load_validates_its_arguments(primary_artifact, primary_grg_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.cusparse
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
 @pytest.mark.parametrize(
     "direction",
     ["up", "UP", Direction.UP, pygrgl.TraversalDirection.UP],
     ids=["lower", "upper", "Direction", "TraversalDirection"],
 )
-def test_captured_matmul_accepts_every_direction_form(primary_artifact, direction):
+def test_captured_matmul_accepts_every_direction_form(primary_artifact, direction, backend):
     """Only the lowercase literal and Direction (a StrEnum) used to work."""
-    with testing.load(primary_artifact, backend="cusparse", capture=True,
+    with testing.load(primary_artifact, backend=backend, capture=True,
                       req=make_runconfig_kernel("up", 1)) as grg:
         ones = np.ones((1, grg.num_samples), dtype=DATA_DTYPE)
         assert float(grg.matmul(ones, direction).sum()) > 0
 
 
-@pytest.mark.cusparse
-def test_captured_matmul_rejects_an_unknown_direction(primary_artifact):
-    with testing.load(primary_artifact, backend="cusparse", capture=True,
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
+def test_captured_matmul_rejects_an_unknown_direction(primary_artifact, backend):
+    with testing.load(primary_artifact, backend=backend, capture=True,
                       req=make_runconfig_kernel("up", 1)) as grg:
         with pytest.raises(ValueError, match="(?i)unknown direction"):
             grg.matmul(np.ones((1, grg.num_samples), dtype=DATA_DTYPE), "sideways")
@@ -359,14 +366,14 @@ def _expected_miss(grg_obj, k: int) -> np.ndarray:
     return miss
 
 
-# Marks, not bare strings: the collection hook filters on item.keywords, so an
-# unmarked "cusparse" param initialised CUDA under --backend mkl and -m "not cusparse".
+# Hardware cases carry backend marks so CPU selection never executes them.
 @pytest.mark.parametrize(
     "backend",
     [
         pytest.param("reference", id="reference"),
         pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
         pytest.param("cusparse", id="cusparse", marks=pytest.mark.cusparse),
+        pytest.param("rocsparse", id="rocsparse", marks=pytest.mark.rocsparse),
     ],
 )
 @pytest.mark.parametrize("k", [1, 2], ids=["k1", "k2"])
@@ -382,20 +389,20 @@ def test_up_miss_output_matches_pygrgl_on_every_backend(missing_artifact, missin
     np.testing.assert_allclose(got, expected, atol=1e-9)
 
 
-@pytest.mark.cusparse
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
 @pytest.mark.parametrize("k", [1, 2], ids=["k1", "k2"])
-def test_captured_copy_mode_accumulates_miss_into_the_callers_array(missing_artifact, missing_grg, k):
+def test_captured_copy_mode_accumulates_miss_into_the_callers_array(missing_artifact, missing_grg, k, backend):
     expected = _expected_miss(missing_grg, k)
     ones = np.ones((k, missing_grg.num_samples), dtype=DATA_DTYPE)
     got = np.zeros_like(expected)
-    with testing.load(missing_artifact, backend="cusparse", capture=True,
+    with testing.load(missing_artifact, backend=backend, capture=True,
                       req=make_runconfig_gwas(maxk=k)) as grg:
         grg.matmul(ones, "up", miss=got)
     np.testing.assert_allclose(got, expected, atol=1e-9)
 
 
-@pytest.mark.cusparse
-def test_native_mode_accumulates_miss_into_the_callers_device_array(missing_artifact, missing_grg):
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
+def test_native_mode_accumulates_miss_into_the_callers_device_array(missing_artifact, missing_grg, backend):
     """Native mode updates a caller-OWNED device array in place, correctly.
 
     The known failure mode is a caller that hands over ``cupy.asarray(host_miss)``
@@ -406,9 +413,9 @@ def test_native_mode_accumulates_miss_into_the_callers_device_array(missing_arti
     import cupy as cp
 
     expected = _expected_miss(missing_grg, 1)
-    with testing.load(missing_artifact, backend="cusparse", capture=True,
+    with testing.load(missing_artifact, backend=backend, capture=True,
                       native=True, req=make_runconfig_gwas(maxk=1)) as grg:
-        device = cp.cuda.Device(grg._src_tensors[next(iter(grg._src_tensors))].device.index)
+        device = cp.cuda.Device(grg.device)
         with device:
             ones = cp.ones((1, missing_grg.num_samples), dtype=DATA_DTYPE)
             miss = cp.zeros((1, missing_grg.num_mutations), dtype=DATA_DTYPE)
@@ -418,18 +425,18 @@ def test_native_mode_accumulates_miss_into_the_callers_device_array(missing_arti
     assert got.sum() == pytest.approx(expected.sum())
 
 
-@pytest.mark.cusparse
-def test_native_mode_host_miss_message_warns_against_the_temporary(missing_artifact, missing_grg):
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
+def test_native_mode_host_miss_message_warns_against_the_temporary(missing_artifact, missing_grg, backend):
     """The old message read as an instruction to write the bug.
 
     It said only "expected cupy.ndarray ..., got ndarray", and the natural way to
     satisfy that is ``cupy.asarray(miss)`` -- which silently discards the result.
     """
-    with testing.load(missing_artifact, backend="cusparse", capture=True,
+    with testing.load(missing_artifact, backend=backend, capture=True,
                       native=True, req=make_runconfig_gwas(maxk=1)) as grg:
         import cupy as cp
 
-        device_index = grg._src_tensors[next(iter(grg._src_tensors))].device.index
+        device_index = grg.device
         with cp.cuda.Device(device_index):
             ones = cp.ones((1, missing_grg.num_samples), dtype=DATA_DTYPE)
             host_miss = np.zeros((1, missing_grg.num_mutations), dtype=DATA_DTYPE)
@@ -440,17 +447,17 @@ def test_native_mode_host_miss_message_warns_against_the_temporary(missing_artif
     assert "cupy.asarray()" in message
 
 
-@pytest.mark.cusparse
-def test_down_miss_input_matches_between_eager_and_captured(missing_artifact, missing_grg):
+@pytest.mark.parametrize("backend", GPU_BACKENDS)
+def test_down_miss_input_matches_between_eager_and_captured(missing_artifact, missing_grg, backend):
     runconfig = make_runconfig_bolt()
     rng = np.random.default_rng(4242)
     x = rng.standard_normal((1, missing_grg.num_mutations), dtype=DATA_DTYPE)
     miss_in = rng.standard_normal((1, missing_grg.num_mutations), dtype=DATA_DTYPE)
     atol, rtol = tol(DATA_DTYPE)
     with contextlib.ExitStack() as stack:
-        eager = load_grg_spmv_single(missing_artifact, make_backend_cusparse(device=0), runconfig, stack)
+        eager = load_grg_spmv_single(missing_artifact, backend_factory(backend)(device=0), runconfig, stack)
         captured = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True), runconfig, stack
+            missing_artifact, backend_factory(backend)(device=0, capture=True), runconfig, stack
         )
         expected = eager.matmul(x, "down", miss=miss_in.copy())
         got = captured.matmul(x, "down", miss=miss_in.copy())

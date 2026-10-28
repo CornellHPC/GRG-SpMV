@@ -92,18 +92,19 @@ python -m pygrgl_spmv convert chr1.grg artifacts/chr1.grg_spmv
 ### Running
 
 The adaptor hides planning, layout and runtime setup for user behind three calls: 
-- choose a backend (CPU-mkl or GPU-cuSparse)
+- choose a backend (CPU MKL, GPU cuSPARSE or GPU rocSPARSE)
 - choose a run configuration (the application)
 - load artifacts into an `ExitStack` that owns the runtime.
 The loaded GRG artifacts are then ready for execution with `grapp`.
-A minimal example utilizing GPU (cuSparse) backend with pca: 
+A minimal PCA example:
 
-This needs `grapp`, which is not pulled in by `pip install .` or `.[cuda13]` — install it separately, or use the `dev` extra.
+Install `grapp` separately, or use the `dev` extra; neither GPU extra includes it.
 
 ```python
 from contextlib import ExitStack
 
-from pygrgl_spmv import make_backend_cusparse, make_runconfig_pca, load_grg_spmv_multi
+from pygrgl_spmv import make_backend_cusparse, make_backend_rocsparse, make_backend_mkl
+from pygrgl_spmv import make_runconfig_pca, load_grg_spmv_multi
 # grapp.linalg first: importing grapp.grg_calculator ahead of it hits a circular
 # import inside grapp (grg_calculator -> util -> util.simple -> grg_calculator).
 from grapp.linalg import PCs
@@ -112,7 +113,9 @@ from grapp.grg_calculator import GRGSpMVCalculator
 artifacts = ["artifacts/chr1.grg_spmv", "artifacts/chr2.grg_spmv"]
 # capture=True is required for threads > 1: two artifacts on one device share one
 # runtime, and the eager path rejects concurrent calls on it.
-backend = make_backend_cusparse(device=0, capture=True)  # or make_backend_mkl(n_threads=0)
+backend = make_backend_cusparse(device=0, capture=True)
+# AMD: make_backend_rocsparse(device=0, capture=True)
+# CPU: make_backend_mkl(n_threads=0)
 req = make_runconfig_pca()                  # kernel / pca / bolt / gwas
 
 with ExitStack() as stack:
@@ -160,7 +163,10 @@ For covariate GWAS set `make_runconfig_gwas(maxk=n_covariates + 1)` so the `X^T 
 
 ### Supported Backends and Parameters
 
-The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
+The adaptor exposes MKL on CPU and cuSPARSE/rocSPARSE on GPUs. Both GPU
+backends support eager/prepared products, capture, native CuPy I/O, streams
+and multiple artifacts on one device. ROCm supports resident single-device
+execution; streaming, multi-GPU, profiling and scratch execution are unsupported.
 
 `make_backend_mkl(n_threads=0, optimize=False)`
 
@@ -171,12 +177,14 @@ The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
 
 `make_backend_cusparse(device=0, allow_residency=True, vram_budget_mb=0, capture=False, native=False)`
 
+`make_backend_rocsparse(device=0, capture=False, native=False)`
+
 | Parameter | Default | Meaning |
 |---|---|---|
 | `device` | `0` | Non-negative integer ordinal (NumPy integers accepted, booleans rejected). CUDA also accepts a per-file dict with the same ordinal contract and loads device groups in parallel. Files on one device share a layout and runtime. |
-| `allow_residency` | `True` | Keep every sparse block resident in VRAM. `False` selects streaming mode. |
-| `vram_budget_mb` | `0` | VRAM cap in MiB. Used only in streaming mode, where it must be `> 0`; ignored when resident. |
-| `capture` | `False` | Capture CUDA graphs after loading and return a `CapturedBoundGRG`, so matmul replays a graph instead of re-issuing kernels. |
+| `allow_residency` | `True` | Keep every sparse block resident in VRAM. `False` selects CUDA streaming and is rejected on ROCm. |
+| `vram_budget_mb` | `0` | CUDA only: VRAM cap in MiB. Used only in streaming mode, where it must be `> 0`; ignored when resident. |
+| `capture` | `False` | Capture vendor graphs after loading, so matmul replays a graph instead of re-issuing kernels. |
 | `native` | `False` | Keep matmul I/O on device (CuPy in, CuPy out, no host copies). Requires `capture=True` — on its own it is silently ignored. In this mode `miss` is an in-place accumulator on the device: pass the array you will read afterwards, never a fresh `cupy.asarray(host_array)`, or the counts are written to a temporary and lost. |
 
 MKL `n_threads` and CUDA `device` also accept mappings keyed by artifact file stem:
@@ -325,4 +333,3 @@ There is no `exit_stack` parameter: the loaders are context managers, and your t
 - `ring_buffer_size=0` is valid for GPU layouts only when the budget keeps every sparse block resident
 - the package root intentionally stays CPU-safe and does not re-export GPU runtime symbols
 - in `native=True` mode, `matmul` awaits only CuPy's *current* stream on the capture device, which is where a plain `cupy.asarray(...)` enqueues. Synchronize inputs yourself if you produce them on an explicit `cupy.cuda.Stream()`, or hand over a CuPy view of torch memory
-- native-mode missingness has an open `grapp`-side defect: see [docs/grapp-native-miss-issue.md](docs/grapp-native-miss-issue.md)

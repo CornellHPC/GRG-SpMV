@@ -201,6 +201,7 @@ class RocsparseRuntime:
         self._entered = self._active_call = False
         self._artifacts, self._grgs = [], ()
         self._shared_ones = None
+        self._graphs = []
         self._caller_stream = self._root_stream = None
         self._aux = None
         self.stream = None
@@ -254,6 +255,9 @@ class RocsparseRuntime:
                 self._caller_stream.synchronize()
             if self._root_stream is not None:
                 self._root_stream.synchronize()
+            for owner in self._graphs:
+                owner._invalidate()
+            self._graphs.clear()
             for artifact in self._artifacts:
                 for dense in artifact.prepared.values():
                     dense.close()

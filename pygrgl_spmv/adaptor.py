@@ -25,28 +25,19 @@ from pygrgl_spmv.backends.cusparse import (
 
 
 # ---------------------------------------------------------------------------
-# CUDA-graph wrappers
+# Captured GRG wrappers
 # ---------------------------------------------------------------------------
 
-class CapturedBoundGRG:
-    """BoundGRG variant backed by pre-captured CUDA graphs.
+class _CapturedBoundGRGBase:
+    """Shared lifetime, capture keys and array validation for GPU graph wrappers."""
 
-    All BoundGRG attributes are delegated to the wrapped *grg* via __getattr__.
-
-    matmul() performs graph replay. When *native=False* (default), input is a
-    numpy array copied host→device and output is returned as a numpy array.
-    When *native=True*, input is a cupy.ndarray on device and output is a
-    cupy.ndarray on device — no host transfers occur. (torch.Tensor input is
-    rejected in native mode; see matmul for the rationale.)
-    """
-
-    def __init__(self, grg, prepared_ops, graphs, src_tensors, init_tensors, miss_tensors, capture_stream, *, native=False, device_lock=None):
+    def __init__(self, grg, prepared_ops, graphs, src_buffers, init_buffers, miss_buffers, capture_stream, *, native=False, device_lock=None):
         self._grg = grg
         self._prepared_ops = prepared_ops  # dict[key, PreparedOp]
-        self._graphs = graphs              # dict[key, CUDAGraph]
-        self._src_tensors = src_tensors    # dict[key, torch.Tensor]
-        self._init_tensors = init_tensors  # dict[key, torch.Tensor]
-        self._miss_tensors = miss_tensors  # dict[key, torch.Tensor]
+        self._graphs = graphs              # dict[key, vendor graph]
+        self._src_buffers = src_buffers    # dict[key, device buffer]
+        self._init_buffers = init_buffers  # dict[key, device buffer]
+        self._miss_buffers = miss_buffers  # dict[key, device buffer]
         self._capture_stream = capture_stream
         self._native = native
         # Serializes matmul() across all GRGs sharing a device; nullcontext when
@@ -55,20 +46,11 @@ class CapturedBoundGRG:
         self._closed = False
 
     def _invalidate(self) -> None:
-        """Mark this GRG dead once its owning runtime is torn down.
-
-        Registered on the loader's ExitStack. Unlike the eager path, graph replay
-        does not go through the runtime's _call_scope(), so nothing else would
-        notice that the buffers the graph holds pointers into have been freed.
-
-        Under the lock, so teardown waits for an in-flight replay instead of
-        freeing underneath it. Clearing the dicts is what releases the graph pools
-        and staging arenas; a retained handle would otherwise pin them.
-        """
+        """Release graphs and staging buffers under the device's replay lock."""
         with self._device_lock:
             self._closed = True
-            for owned in (self._graphs, self._src_tensors, self._init_tensors,
-                          self._miss_tensors, self._prepared_ops):
+            for owned in (self._graphs, self._src_buffers, self._init_buffers,
+                          self._miss_buffers, self._prepared_ops):
                 owned.clear()
 
     @property
@@ -81,27 +63,16 @@ class CapturedBoundGRG:
         return getattr(self._grg, name)
 
     def _key(self, direction, by_individual, init_mode="none", use_miss=False, emit_all_nodes=False):
-        """Resolve the captured-graph key for this call, or fail loudly.
-
-        There is deliberately no fallback. The old one degraded a miss to
-        ``(direction, by_individual, "none", False)``, discarding BOTH init_mode
-        and use_miss -- and it could only ever fire when the caller had passed an
-        init or a miss, so it existed solely to throw them away. Measured on the
-        missingness fixture: an ``init="xtx"`` call returned the plain
-        allele-count answer, off by 400, with the first five values *identical*
-        because g**2 == g for 0/1 genotypes. A spot check passes.
-
-        Every miss is a run-configuration bug, so name both sides of it.
-        """
+        """Require an exact captured key: missing init/miss modes cannot be dropped."""
         k = (direction, by_individual, init_mode, use_miss, emit_all_nodes)
-        if k in self._src_tensors:
+        if k in self._src_buffers:
             return k
         raise ValueError(
-            "CapturedBoundGRG.matmul(): no CUDA graph was captured for "
+            "CapturedBoundGRG.matmul(): no graph was captured for "
             f"(direction={direction!r}, by_individual={by_individual!r}, "
             f"init_mode={init_mode!r}, use_miss={use_miss!r}, "
             f"emit_all_nodes={emit_all_nodes!r}). Captured keys: "
-            f"{sorted(self._src_tensors)}. Add a matching CaptureSpec to the "
+            f"{sorted(self._src_buffers)}. Add a matching CaptureSpec to the "
             "RunConfigs (plus the matching need_* flag on its "
             "RuntimeRequirements), or load with capture=False."
         )
@@ -127,7 +98,7 @@ class CapturedBoundGRG:
                         exact_k=False):
         """Validate one input array against expected shape/dtype/device.
 
-        expected_device: torch.device (native mode) or None (copy mode → numpy).
+        expected_device: device ordinal or torch.device; None selects host arrays.
         role: 'input' | 'init' | 'miss-in' | 'miss-out' (for error wording).
         exact_k: when True, axis 0 must equal the expected k exactly. Only
             ``input`` may be shorter than the captured k (it is zero-padded and
@@ -170,10 +141,11 @@ class CapturedBoundGRG:
                     f"matmul(): {name} ({role}) expected cupy.ndarray on "
                     f"{expected_device} (native mode), got {type(arr).__name__}.{hint}"
                 )
-            if arr.device.id != expected_device.index:
+            device_index = getattr(expected_device, "index", expected_device)
+            if arr.device.id != device_index:
                 raise TypeError(
                     f"matmul(): {name} ({role}) expected device {expected_device}, "
-                    f"got cupy array on cuda:{arr.device.id}"
+                    f"got cupy array on device {arr.device.id}"
                 )
             actual_np_dtype = np.dtype(arr.dtype)
         else:
@@ -214,6 +186,9 @@ class CapturedBoundGRG:
                 f"with trailing dims {exp_shape[1:]}, got {actual_shape}"
             )
 
+class CapturedBoundGRG(_CapturedBoundGRGBase):
+    """CUDA graph replay with NumPy copy mode or CuPy native I/O."""
+
     def _maybe_cast_to_capture_dtype(self, arr, target_dtype):
         """If arr is int32 and target is fp64, cast to fp64; otherwise pass through.
 
@@ -238,7 +213,7 @@ class CapturedBoundGRG:
         input : array
             Source matrix of shape ``(k, input_cols)``, dtype matching the runtime
             (float32 or float64). ``k`` (axis 0) may be **smaller than or equal to**
-            the captured ``k`` (``self._src_tensors[key].shape[0]``); ``input_cols``
+            the captured ``k`` (``self._src_buffers[key].shape[0]``); ``input_cols``
             (axis 1) must match exactly. When ``k`` is smaller, the input is zero-
             padded up to the captured ``k`` before the graph replays and the output
             is truncated back, so ``result`` has the caller's ``k``. ``init``/``miss``
@@ -254,7 +229,7 @@ class CapturedBoundGRG:
             (vector / matrix / xtx). Raises ValueError if the captured key needs
             init and ``init`` is None.
         miss : None | array
-            DOWN with use_miss: miss INPUT, shape ``self._miss_tensors[key].shape``.
+            DOWN with use_miss: miss INPUT, shape ``self._miss_buffers[key].shape``.
             UP   with use_miss: miss OUTPUT accumulator, shape
             ``self._prepared_ops[key].miss_output.shape``; updated in place (+=).
 
@@ -349,7 +324,7 @@ class CapturedBoundGRG:
             import torch
             nvtx = torch.cuda.nvtx
             key = self._key(direction, by_individual, init_mode, use_miss, emit_all_nodes)
-            src = self._src_tensors[key]
+            src = self._src_buffers[key]
 
             expected_dtype = src.dtype
             expected_device = src.device if self._native else None
@@ -397,17 +372,17 @@ class CapturedBoundGRG:
                 # init/miss must match the input's k exactly.
                 return (k_prime,) + tuple(captured_shape[1:])
 
-            if key in self._init_tensors:
+            if key in self._init_buffers:
                 self._validate_array(
                     init_payload, name="init", role="init", exact_k=True,
-                    expected_shape=_expect(self._init_tensors[key].shape),
+                    expected_shape=_expect(self._init_buffers[key].shape),
                     expected_dtype=expected_dtype,
                     expected_device=expected_device,
                 )
-            if key in self._miss_tensors:
+            if key in self._miss_buffers:
                 self._validate_array(
                     miss, name="miss", role="miss-in", exact_k=True,
-                    expected_shape=_expect(self._miss_tensors[key].shape),
+                    expected_shape=_expect(self._miss_buffers[key].shape),
                     expected_dtype=expected_dtype,
                     expected_device=expected_device,
                 )
@@ -479,25 +454,25 @@ class CapturedBoundGRG:
                 nvtx.range_pop()
 
                 nvtx.range_push("init")
-                if key in self._init_tensors:
+                if key in self._init_buffers:
                     if init_payload is None:
                         raise ValueError(f"matmul() requires init data for captured graph key={key!r}")
                     init_cast = self._maybe_cast_to_capture_dtype(init_payload, src.dtype)
                     if self._native:
-                        _stage(self._init_tensors[key], torch.as_tensor(init_cast))
+                        _stage(self._init_buffers[key], torch.as_tensor(init_cast))
                     else:
-                        _stage(self._init_tensors[key], torch.from_numpy(np.ascontiguousarray(init_cast)))
+                        _stage(self._init_buffers[key], torch.from_numpy(np.ascontiguousarray(init_cast)))
                 nvtx.range_pop()
 
                 nvtx.range_push("miss_input")
-                if key in self._miss_tensors:
+                if key in self._miss_buffers:
                     if miss is None:
                         raise ValueError(f"matmul() requires miss for captured graph key={key!r}")
                     miss_cast = self._maybe_cast_to_capture_dtype(miss, src.dtype)
                     if self._native:
-                        _stage(self._miss_tensors[key], torch.as_tensor(miss_cast))
+                        _stage(self._miss_buffers[key], torch.as_tensor(miss_cast))
                     else:
-                        _stage(self._miss_tensors[key], torch.from_numpy(np.ascontiguousarray(miss_cast)))
+                        _stage(self._miss_buffers[key], torch.from_numpy(np.ascontiguousarray(miss_cast)))
                 nvtx.range_pop()
 
                 # replay() launches on the current torch stream, which is cap here.
@@ -522,14 +497,14 @@ class CapturedBoundGRG:
                             result = cp.asarray(op.output[:k_prime, :]).copy()
                             if input_is_int32:
                                 result = result.astype(cp.int32)
-                            if use_miss and key not in self._miss_tensors:
+                            if use_miss and key not in self._miss_buffers:
                                 miss += cp.asarray(op.miss_output[:k_prime, :]).astype(miss.dtype, copy=False)
                 else:
                     # .cpu() copies on cap (current stream) and syncs that copy.
                     result = op.output[:k_prime, :].cpu().numpy().copy()
                     if input_is_int32:
                         result = result.astype(np.int32)
-                    if use_miss and key not in self._miss_tensors:
+                    if use_miss and key not in self._miss_buffers:
                         miss += op.miss_output[:k_prime, :].cpu().numpy().astype(miss.dtype, copy=False)
                 nvtx.range_pop()
 
@@ -549,7 +524,7 @@ class CapturedBoundGRG:
 
 @dataclass(frozen=True)
 class CaptureSpec:
-    """Describes one prepare_matmul_cuda call to be captured as a CUDA graph."""
+    """Describes one prepared GPU matmul to capture as a graph."""
     direction: str
     k: int
     by_individual: bool = False
@@ -560,7 +535,7 @@ class CaptureSpec:
 
 @dataclass(frozen=True)
 class RunConfigs:
-    """Pairs a RuntimeRequirements with the set of CUDA graph captures to perform.
+    """Pairs RuntimeRequirements with the GPU graph captures to perform.
 
     req: controls backend buffer allocation (passed to plan_*_layout).
     capture_ops: sequence of CaptureSpec describing every graph to capture when
@@ -1402,8 +1377,6 @@ def _load_rocsparse_multi(paths, cfg, req, stack, dtype):
     from pygrgl_spmv.backends.rocsparse import RocsparseRuntime, plan_rocsparse_layout
     import cupy as cp
 
-    if cfg.capture:
-        raise NotImplementedError("ROCm capture is not implemented")
     with cp.cuda.Device(cfg.device):
         stream = cp.cuda.Stream(non_blocking=True)
         layout = plan_rocsparse_layout(
@@ -1411,6 +1384,11 @@ def _load_rocsparse_multi(paths, cfg, req, stack, dtype):
             device=cfg.device, stream=stream, shared_ones=cfg.shared_ones,
         )
         runtime = stack.enter_context(RocsparseRuntime(layout))
+        if cfg.capture:
+            from pygrgl_spmv.backends.rocsparse.capture import capture_grg
+
+            lock = threading.RLock()
+            return [capture_grg(grg, req, cfg, stack, lock) for grg in runtime.grgs]
         return list(runtime.grgs)
 
 

@@ -52,3 +52,21 @@ def test_sdk_discovery_failure_is_an_installation_error(monkeypatch, failure):
             ffi.library()
     finally:
         ffi.library.cache_clear()
+
+
+@pytest.mark.rocsparse
+def test_failed_capture_drops_graphs_before_stack_unwinds(primary_artifact):
+    from contextlib import ExitStack
+    from pygrgl_spmv import CaptureSpec, RunConfigs, load_grg_spmv_multi, make_backend_rocsparse, testing
+
+    # The second duplicate spec fails after one successful graph capture.
+    # Retaining the traceback must not retain a graph referencing freed state.
+    spec = CaptureSpec("up", 1)
+    with pytest.raises(ValueError, match="Duplicate CaptureSpec") as error:
+        with ExitStack() as stack:
+            load_grg_spmv_multi([primary_artifact], make_backend_rocsparse(capture=True),
+                               RunConfigs(testing.requirements(), (spec, spec)), stack)
+    frames = [entry.frame.f_locals for entry in error.traceback if entry.name == "capture_grg"]
+    assert len(frames) == 1
+    assert frames[0]["graphs"] == {}
+    assert frames[0]["graph"] is None
