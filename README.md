@@ -7,15 +7,15 @@
 
 Currently, the following hardware is supported:
 - CPU: Any x86 CPU is supported, though Intel MKL is not officially supported on AMD CPUs.
-- GPU: Nvidia GPUs with CUDA Toolkit Version >= 13.3.1 **is required**. Earlier versions do not gurantee correctness. In case where you cannot install a newer driver or cuda runtime, we recommend you relying on [CUDA Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
+- NVIDIA GPU: CUDA Toolkit >= 13.3.1 is required for correctness. Older drivers may support [CUDA Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
+- AMD GPU: pip ROCm SDK 10.1.0 and HIP CuPy are required.
 
 ## Install
 
 Requires Python >= 3.11. To install, use:
 
 ```bash
-pip install .          # install the basic dependencies; can be used with the MKL-based CPU backend
-pip install '.[cuda13]'   # adds support for the cuSPARSE-based GPU backend
+pip install .          # CPU dependencies; install MKL separately
 ```
 
 To use the MKL-based CPU backend, you need to install MKL manually. We recommend using the conda package manager for this.
@@ -23,6 +23,46 @@ To use the MKL-based CPU backend, you need to install MKL manually. We recommend
 conda install -c conda-forge mkl mkl-devel mkl-static mkl-include
 ```
 You can also install following Intel's official [instructions](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-download.html).
+
+Use a separate virtual environment for each GPU vendor. Both extras pin the same
+CuPy source, including the [Lanczos breakdown fix](https://github.com/cupy/cupy/pull/10098)
+and the separate [near-full-rank restart fix](https://github.com/cupy/cupy/issues/10220).
+Prepare the shared build dependencies first:
+
+```bash
+uv venv --python 3.12.15 --seed .venv
+source .venv/bin/activate
+pip install numpy==2.5.4 Cython==3.3.0 setuptools==84.2.1 wheel==0.48.0 fastrlock==0.8.4 hatchling
+export CUPY_NUM_BUILD_JOBS=8
+```
+
+For NVIDIA, install CUDA Toolkit >= 13.3.1 and set `CUDA_PATH` to its root:
+
+```bash
+unset CUPY_INSTALL_USE_HIP HCC_AMDGPU_TARGET ROCM_HOME ROCM_PATH HIP_PATH
+export PATH="$CUDA_PATH/bin:$PATH"
+pip install --no-build-isolation '.[cuda13]'
+```
+
+For AMD, this MI300X (gfx942) setup uses the pip SDK:
+
+```bash
+unset ROCM_HOME ROCM_PATH HIP_PATH LD_LIBRARY_PATH CMAKE_PREFIX_PATH
+pip install 'rocm[libraries,devel,device-gfx942]==10.1.0' \
+    --index-url https://stable.repo.amd.com/rocm/whl-next/
+rocm-sdk init
+export ROCM_HOME="$(rocm-sdk path --root)"
+export ROCM_PATH="$ROCM_HOME"
+export PATH="$(rocm-sdk path --bin):$PATH"
+export CUPY_INSTALL_USE_HIP=1 HCC_AMDGPU_TARGET=gfx942
+pip install --no-build-isolation '.[rocm10]'
+rocm-sdk test
+```
+
+`[devel]` supplies SDK headers/build tools; `--no-build-isolation` uses the
+prepared build environment. These switches are separate from the CuPy fixes.
+Without `ROCM_PATH`, rocSPARSE is discovered through the active interpreter's
+`python -m rocm_sdk path --root`. An invalid override or missing SDK is an error.
 
 ## Basic Usage
 
