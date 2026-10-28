@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import scipy.sparse as sp
+from pygrgl_spmv.backends.base import materialize_sparse_block
 
 from pygrgl_spmv.grg.sparse import binary_csr_from_parts, finalize_int_array, pick_small_signed_int_dtype
 
@@ -89,3 +91,23 @@ def test_binary_csr_from_parts_validates_shapes():
             indptr=np.array([0, 1], dtype=np.int32),
             shape=(1,),
         )
+
+
+def test_store_t_coo_materialization_is_row_sorted():
+    block = sp.csr_matrix(
+        (
+            np.ones(4, dtype=np.bool_),
+            np.array([1, 2, 0, 2], dtype=np.int32),
+            np.array([0, 2, 4], dtype=np.int32),
+        ),
+        shape=(2, 3),
+    )
+    direct = block.T.tocoo()
+    assert not np.all(np.asarray(direct.row)[1:] >= np.asarray(direct.row)[:-1])
+    stored = materialize_sparse_block(block, store="T", fmt="COO")
+    rows = np.asarray(stored.row)
+    cols = np.asarray(stored.col)
+    assert np.all(rows[1:] >= rows[:-1])
+    assert np.all((rows[1:] > rows[:-1]) | ((rows[1:] == rows[:-1]) & (cols[1:] >= cols[:-1])))
+    if hasattr(stored, "has_canonical_format"):
+        assert bool(stored.has_canonical_format)

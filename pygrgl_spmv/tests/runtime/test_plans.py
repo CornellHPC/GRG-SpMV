@@ -6,10 +6,10 @@ import pygrgl_spmv.backends._cuda_stream as cuda_stream_mod
 import pytest
 
 from pygrgl_spmv.backends._cuda_stream import parse_cuda_device, parse_cuda_stream
-from pygrgl_spmv.backends.cusparse.plan import CusparsePlan, CusparsePlanPair, DenseOrder, Operation, SpMMAlgorithm
 from pygrgl_spmv.backends.mkl import MklPlan, MklPlanPair
 from pygrgl_spmv.backends.reference import ReferencePlan, ReferencePlanPair
 from pygrgl_spmv.backends.types import SparseFormat, StoredMatrix
+from pygrgl_spmv.tests.runtime._gpu import plan_types
 
 
 class _ProtocolStream:
@@ -165,8 +165,11 @@ def test_mkl_plan_from_dict_and_storage_sharing():
         MklPlanPair(plan_up=None, plan_down=None)
 
 
-def test_cusparse_plan_parse_and_properties():
-    plan = CusparsePlan.from_dict(
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_gpu_plan_parse_and_properties(backend):
+    Plan, _ = plan_types(backend)
+    scratch = "3|1|2" if backend == "cusparse" else "none"
+    plan = Plan.from_dict(
         {
             "store": "N",
             "fmt": "CSR",
@@ -175,19 +178,19 @@ def test_cusparse_plan_parse_and_properties():
             "orderB": "ROW",
             "orderC": "ROW",
             "algo": "DEFAULT",
-            "scratch": "3|1|2",
+            "scratch": scratch,
         }
     )
     assert plan.store == StoredMatrix.N
     assert plan.fmt == SparseFormat.CSR
-    assert plan.op_a == Operation.N
-    assert plan.op_b == Operation.N
-    assert plan.order_b == DenseOrder.ROW
-    assert plan.order_c == DenseOrder.ROW
-    assert plan.algo == SpMMAlgorithm.DEFAULT
+    assert plan.op_a.name == "N"
+    assert plan.op_b.name == "N"
+    assert plan.order_b.name == "ROW"
+    assert plan.order_c.name == "ROW"
+    assert plan.algo.name == "DEFAULT"
     assert plan.supported
     assert str(getattr(plan.direction, "name", plan.direction)).lower() == "up"
-    assert plan.scratch == "1|2|3"
+    assert plan.scratch == ("1|2|3" if backend == "cusparse" else "none")
 
 
 @pytest.mark.parametrize(
@@ -236,29 +239,49 @@ def test_cusparse_plan_parse_and_properties():
         ),
     ],
 )
-def test_cusparse_plan_rejects_invalid_values(mapping, match):
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_gpu_plan_rejects_invalid_values(mapping, match, backend):
+    Plan, _ = plan_types(backend)
+    if backend == "rocsparse":
+        mapping = dict(mapping)
+        if mapping.get("algo") == "CSR_ALG3":
+            mapping["algo"] = "COO_ATOMIC"
+        match = ("supports only scratch" if "scratch" in match
+                 else match.replace("cuSPARSE", "rocSPARSE").replace("Cusparse", "Rocsparse"))
     with pytest.raises(ValueError, match=match):
-        CusparsePlan.from_dict(mapping)
+        Plan.from_dict(mapping)
 
 
-def test_cusparse_plan_storage_sharing_rules():
-    up = CusparsePlan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
-    down = CusparsePlan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_gpu_plan_storage_sharing_rules(backend):
+    Plan, _ = plan_types(backend)
+    up = Plan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
+    down = Plan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
     assert up.can_share_storage_with(down)
 
-    up_coo = CusparsePlan(store="N", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
-    down_coo = CusparsePlan(store="T", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
+    up_coo = Plan(store="N", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
+    down_coo = Plan(store="T", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT")
     assert not up_coo.can_share_storage_with(down_coo)
 
 
-def test_cusparse_plan_pair_rejects_direction_mismatch():
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+def test_gpu_plan_pair_rejects_direction_mismatch(backend):
+    Plan, PlanPair = plan_types(backend)
     with pytest.raises(ValueError, match="plan_up expects a UP plan"):
-        CusparsePlanPair(
-            plan_up=CusparsePlan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
+        PlanPair(
+            plan_up=Plan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
             plan_down=None,
         )
     with pytest.raises(ValueError, match="plan_down expects a DOWN plan"):
-        CusparsePlanPair(
+        PlanPair(
             plan_up=None,
-            plan_down=CusparsePlan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
+            plan_down=Plan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
         )
+
+
+@pytest.mark.parametrize("fmt,op_a", [("CSR", "T"), ("CSC", "N")])
+@pytest.mark.parametrize("spmv", ["CSR_ADAPTIVE", "CSR_LRB"])
+def test_rocsparse_rejects_effective_transpose_spmv(fmt, op_a, spmv):
+    Plan, _ = plan_types("rocsparse")
+    with pytest.raises(ValueError, match="unsupported rocSPARSE plan"):
+        Plan("N", fmt, op_a, "N", "ROW", "ROW", "CSR_ROW_SPLIT", spmv=spmv)

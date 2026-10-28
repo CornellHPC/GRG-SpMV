@@ -18,7 +18,7 @@ from pygrgl_spmv.grg.artifact import (
     save_grg_spmv,
     scan_grg_spmv,
 )
-from pygrgl_spmv.tests.runtime._runtime_builders import build_reference_layout
+from pygrgl_spmv.tests.runtime._runtime_builders import build_reference_layout, build_layout_for_backend, runtime_cls_for_backend, nonreference_backend_cases
 from pygrgl_spmv.tests.runtime._streaming_cases import write_three_level_band_artifact
 
 
@@ -134,7 +134,8 @@ def test_load_grg_spmv_rehydrates_shared_nonempty_block_data(primary_artifact):
         assert np.shares_memory(data, first)
 
 
-def test_runtime_consumes_artifact_without_grg_loader(primary_artifact, monkeypatch):
+@pytest.mark.parametrize("backend_name", (pytest.param("reference", id="reference"), *nonreference_backend_cases()))
+def test_runtime_consumes_artifact_without_grg_loader(primary_artifact, monkeypatch, backend_name):
     import pygrgl_spmv.grg as grg_module
 
     def _forbidden_loader(*_args, **_kwargs):
@@ -142,16 +143,17 @@ def test_runtime_consumes_artifact_without_grg_loader(primary_artifact, monkeypa
 
     monkeypatch.setattr(grg_module.pygrgl, "load_immutable_grg", _forbidden_loader)
 
-    layout = build_reference_layout([primary_artifact])
-    with ReferenceRuntime(layout) as runtime:
+    layout = build_layout_for_backend(backend_name, [primary_artifact])
+    with runtime_cls_for_backend(backend_name)(layout) as runtime:
         (grg,) = runtime.grgs
         assert grg.artifact_path == primary_artifact
         assert grg.num_samples > 0
 
 
-def test_bound_operator_round_trips_artifact_metadata(primary_artifact, primary_grg):
-    layout = build_reference_layout([primary_artifact])
-    with ReferenceRuntime(layout) as runtime:
+@pytest.mark.parametrize("backend_name", (pytest.param("reference", id="reference"), *nonreference_backend_cases()))
+def test_bound_operator_round_trips_artifact_metadata(primary_artifact, primary_grg, backend_name):
+    layout = build_layout_for_backend(backend_name, [primary_artifact])
+    with runtime_cls_for_backend(backend_name)(layout) as runtime:
         (grg,) = runtime.grgs
         assert grg.shape == (primary_grg.num_samples, primary_grg.num_mutations)
         assert grg.num_individuals == primary_grg.num_individuals

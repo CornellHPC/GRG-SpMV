@@ -7,15 +7,15 @@
 
 Currently, the following hardware is supported:
 - CPU: Any x86 CPU is supported, though Intel MKL is not officially supported on AMD CPUs.
-- GPU: Nvidia GPUs with CUDA Toolkit Version >= 13.3.1 **is required**. Earlier versions do not gurantee correctness. In case where you cannot install a newer driver or cuda runtime, we recommend you relying on [CUDA Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
+- NVIDIA GPU: CUDA Toolkit >= 13.3.1 is required for correctness. Older drivers may support [CUDA Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html).
+- AMD GPU: pip ROCm SDK 10.1.0 and HIP CuPy are required.
 
 ## Install
 
 Requires Python >= 3.11. To install, use:
 
 ```bash
-pip install .          # install the basic dependencies; can be used with the MKL-based CPU backend
-pip install '.[cuda13]'   # adds support for the cuSPARSE-based GPU backend
+pip install .          # CPU dependencies; install MKL separately
 ```
 
 To use the MKL-based CPU backend, you need to install MKL manually. We recommend using the conda package manager for this.
@@ -23,6 +23,46 @@ To use the MKL-based CPU backend, you need to install MKL manually. We recommend
 conda install -c conda-forge mkl mkl-devel mkl-static mkl-include
 ```
 You can also install following Intel's official [instructions](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-download.html).
+
+Use a separate virtual environment for each GPU vendor. Both extras pin the same
+CuPy source, including the [Lanczos breakdown fix](https://github.com/cupy/cupy/pull/10098)
+and the separate [near-full-rank restart fix](https://github.com/cupy/cupy/issues/10220).
+Prepare the shared build dependencies first:
+
+```bash
+uv venv --python 3.12.15 --seed .venv
+source .venv/bin/activate
+pip install numpy==2.5.4 Cython==3.3.0 setuptools==84.2.1 wheel==0.48.0 fastrlock==0.8.4 hatchling
+export CUPY_NUM_BUILD_JOBS=8
+```
+
+For NVIDIA, install CUDA Toolkit >= 13.3.1 and set `CUDA_PATH` to its root:
+
+```bash
+unset CUPY_INSTALL_USE_HIP HCC_AMDGPU_TARGET ROCM_HOME ROCM_PATH HIP_PATH
+export PATH="$CUDA_PATH/bin:$PATH"
+pip install --no-build-isolation '.[cuda13]'
+```
+
+For AMD, this MI300X (gfx942) setup uses the pip SDK:
+
+```bash
+unset ROCM_HOME ROCM_PATH HIP_PATH LD_LIBRARY_PATH CMAKE_PREFIX_PATH
+pip install 'rocm[libraries,devel,device-gfx942]==10.1.0' \
+    --index-url https://stable.repo.amd.com/rocm/whl-next/
+rocm-sdk init
+export ROCM_HOME="$(rocm-sdk path --root)"
+export ROCM_PATH="$ROCM_HOME"
+export PATH="$(rocm-sdk path --bin):$PATH"
+export CUPY_INSTALL_USE_HIP=1 HCC_AMDGPU_TARGET=gfx942
+pip install --no-build-isolation '.[rocm10]'
+rocm-sdk test
+```
+
+`[devel]` supplies SDK headers/build tools; `--no-build-isolation` uses the
+prepared build environment. These switches are separate from the CuPy fixes.
+Without `ROCM_PATH`, rocSPARSE is discovered through the active interpreter's
+`python -m rocm_sdk path --root`. An invalid override or missing SDK is an error.
 
 ## Basic Usage
 
@@ -52,18 +92,19 @@ python -m pygrgl_spmv convert chr1.grg artifacts/chr1.grg_spmv
 ### Running
 
 The adaptor hides planning, layout and runtime setup for user behind three calls: 
-- choose a backend (CPU-mkl or GPU-cuSparse)
+- choose a backend (CPU MKL, GPU cuSPARSE or GPU rocSPARSE)
 - choose a run configuration (the application)
 - load artifacts into an `ExitStack` that owns the runtime.
 The loaded GRG artifacts are then ready for execution with `grapp`.
-A minimal example utilizing GPU (cuSparse) backend with pca: 
+A minimal PCA example:
 
-This needs `grapp`, which is not pulled in by `pip install .` or `.[cuda13]` — install it separately, or use the `dev` extra.
+Install `grapp` separately, or use the `dev` extra; neither GPU extra includes it.
 
 ```python
 from contextlib import ExitStack
 
-from pygrgl_spmv import make_backend_cusparse, make_runconfig_pca, load_grg_spmv_multi
+from pygrgl_spmv import make_backend_cusparse, make_backend_rocsparse, make_backend_mkl
+from pygrgl_spmv import make_runconfig_pca, load_grg_spmv_multi
 # grapp.linalg first: importing grapp.grg_calculator ahead of it hits a circular
 # import inside grapp (grg_calculator -> util -> util.simple -> grg_calculator).
 from grapp.linalg import PCs
@@ -72,7 +113,9 @@ from grapp.grg_calculator import GRGSpMVCalculator
 artifacts = ["artifacts/chr1.grg_spmv", "artifacts/chr2.grg_spmv"]
 # capture=True is required for threads > 1: two artifacts on one device share one
 # runtime, and the eager path rejects concurrent calls on it.
-backend = make_backend_cusparse(device=0, capture=True)  # or make_backend_mkl(n_threads=0)
+backend = make_backend_cusparse(device=0, capture=True)
+# AMD: make_backend_rocsparse(device=0, capture=True)
+# CPU: make_backend_mkl(n_threads=0)
 req = make_runconfig_pca()                  # kernel / pca / bolt / gwas
 
 with ExitStack() as stack:
@@ -120,7 +163,10 @@ For covariate GWAS set `make_runconfig_gwas(maxk=n_covariates + 1)` so the `X^T 
 
 ### Supported Backends and Parameters
 
-The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
+The adaptor exposes MKL on CPU and cuSPARSE/rocSPARSE on GPUs. Both GPU
+backends support eager/prepared products, capture, native CuPy I/O, streams
+and multiple artifacts on one device. ROCm supports resident single-device
+execution; streaming, multi-GPU, profiling and scratch execution are unsupported.
 
 `make_backend_mkl(n_threads=0, optimize=False)`
 
@@ -131,15 +177,17 @@ The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
 
 `make_backend_cusparse(device=0, allow_residency=True, vram_budget_mb=0, capture=False, native=False)`
 
+`make_backend_rocsparse(device=0, capture=False, native=False)`
+
 | Parameter | Default | Meaning |
 |---|---|---|
-| `device` | `0` | CUDA device index, or a per-file dict. Files on one device share a layout and runtime; separate devices load in parallel. |
-| `allow_residency` | `True` | Keep every sparse block resident in VRAM. `False` selects streaming mode. |
-| `vram_budget_mb` | `0` | VRAM cap in MiB. Used only in streaming mode, where it must be `> 0`; ignored when resident. |
-| `capture` | `False` | Capture CUDA graphs after loading and return a `CapturedBoundGRG`, so matmul replays a graph instead of re-issuing kernels. |
+| `device` | `0` | Non-negative integer ordinal (NumPy integers accepted, booleans rejected). CUDA also accepts a per-file dict with the same ordinal contract and loads device groups in parallel. Files on one device share a layout and runtime. |
+| `allow_residency` | `True` | Keep every sparse block resident in VRAM. `False` selects CUDA streaming and is rejected on ROCm. |
+| `vram_budget_mb` | `0` | CUDA only: VRAM cap in MiB. Used only in streaming mode, where it must be `> 0`; ignored when resident. |
+| `capture` | `False` | Capture vendor graphs after loading, so matmul replays a graph instead of re-issuing kernels. |
 | `native` | `False` | Keep matmul I/O on device (CuPy in, CuPy out, no host copies). Requires `capture=True` — on its own it is silently ignored. In this mode `miss` is an in-place accumulator on the device: pass the array you will read afterwards, never a fresh `cupy.asarray(host_array)`, or the counts are written to a temporary and lost. |
 
-Both `n_threads` and `device` accept a mapping keyed by artifact file stem. That is the shape of the JSON configs used by the Mikado benchmark harness (`benchmark/configs/` in the [mikado](https://github.com/CornellHPC/mikado) repository):
+MKL `n_threads` and CUDA `device` also accept mappings keyed by artifact file stem:
 
 ```json
 {"chr1": {"cuda_device": 0},        "chr2": {"cuda_device": 1}}
@@ -221,17 +269,33 @@ with CusparseRuntime(layout) as runtime:
 Everything in `pygrgl_spmv.__all__`, grouped by role:
 
 - **Conversion** — `simple_convert(input_path, output_path, *, dtype=float64) -> Path`
-- **Adaptor (the front door)** — `make_backend_mkl`, `make_backend_cusparse`, `make_runconfig_kernel`, `make_runconfig_pca`, `make_runconfig_bolt`, `make_runconfig_gwas`, `load_grg_spmv_single`, `load_grg_spmv_multi`
-- **Adaptor value objects** — `MklBackendConfig`, `CusparseBackendConfig`, `RunConfigs`, `CaptureSpec`, `CapturedBoundGRG`
+- **Adaptor (the front door)** — `make_backend_mkl`, `make_backend_cusparse`, `make_backend_rocsparse`, `make_runconfig_kernel`, `make_runconfig_pca`, `make_runconfig_bolt`, `make_runconfig_gwas`, `load_grg_spmv_single`, `load_grg_spmv_multi`
+- **Adaptor value objects** — `MklBackendConfig`, `CusparseBackendConfig`, `RocsparseBackendConfig`, `RunConfigs`, `CaptureSpec`, `CapturedBoundGRG`
 - **Lower-level planning/execution** — `RuntimeRequirements`, `plan_reference_layout` + `ReferenceRuntime` + `ReferencePlan` + `ReferencePlanPair`, `plan_mkl_layout` + `MklRuntime` + `MklPlan` + `MklPlanPair`
 
 Not re-exported from the root, on purpose:
 
-- The cuSPARSE planner and runtime live in `pygrgl_spmv.backends.cusparse`, so that `import pygrgl_spmv` stays CPU-safe and works with CuPy and torch absent.
+- GPU planners and runtimes live in `pygrgl_spmv.backends.cusparse` and `pygrgl_spmv.backends.rocsparse`, so that `import pygrgl_spmv` stays CPU-safe and works with CuPy and torch absent.
 - Test helpers live in `pygrgl_spmv.testing` (see [Testing Against pygrgl-spmv](#testing-against-pygrgl-spmv)).
 - `BoundGRG` is the class every loaded GRG actually is, but it is only ever obtained from a runtime or a loader, never constructed directly.
 
-GPU execution is centered on `grg.prepare_matmul_cuda(...)`; eager `grg.matmul(...)` is a NumPy convenience wrapper over that prepared path.
+GPU execution uses `prepare_matmul_cuda(...)` or `prepare_matmul_rocm(...)`; eager `matmul(...)` wraps the same prepared operation with NumPy I/O.
+
+| Backend | Planner / runtime | Prepared buffers | Copy input / return output |
+|---|---|---|---|
+| cuSPARSE | `plan_cusparse_layout` / `CusparseRuntime` | Torch | `op.input.copy_(...)` / `op.output.cpu().numpy()` |
+| rocSPARSE | `plan_rocsparse_layout` / `RocsparseRuntime` | CuPy | `cp.copyto(op.input, cp.asarray(x))` / `cp.asnumpy(op.output)` |
+
+ROCm plans use the same store/format/op/dense-order fields as CUDA. Their optional
+`spmv` algorithm applies only at width one; `spmv=None` always uses SpMM `algo`.
+The default pair uses CSR row-split SpMM / default SpMV upward and shared CSC
+SpMM / transpose NNZ-split SpMV downward. Unsupported vendor combinations raise;
+ROCm 10.1's incorrect normal-CSR NNZ-split SpMV and widths 1/2 NNZ-split SpMM
+(including DEFAULT/CSR) are rejected. Empty blocks are no-ops.
+
+The parallel benchmark entry points `python -m scripts.bench.cusparse` and
+`python -m scripts.bench.rocsparse` accept `--artifact`, `--direction`, `--k`,
+`--warmup`, `--trials` and an optional JSON `--plan`.
 
 ## Testing Against pygrgl-spmv
 
@@ -259,18 +323,18 @@ grg = self.enterContext(spmv_test.load(artifact, backend=backend, max_k=4))
 
 | Function | Purpose |
 |---|---|
-| `available_backends()` | Backends usable in this process, e.g. `("reference", "mkl", "cusparse")`. Parameterize over this instead of writing per-backend `skipif`s. |
-| `is_mkl_available()`, `is_cusparse_available()`, `is_available(backend)` | Individual predicates. Cached, and deliberately fork-safe — they do not initialise the CUDA driver, so `multiprocessing` in a consumer's suite keeps working. Set `PYGRGL_SPMV_DISABLE_GPU=1` to force CPU-only, at any point. |
+| `available_backends()` | Backends usable in this process, a subset of `reference`, `mkl`, `cusparse`, `rocsparse`. Parameterize over this instead of writing per-backend `skipif`s. |
+| `is_mkl_available()`, `is_cusparse_available()`, `is_rocsparse_available()`, `is_available(backend)` | Individual predicates. Cached, and deliberately fork-safe — they do not initialise a GPU driver in the parent, so `multiprocessing` in a consumer's suite keeps working. Set `PYGRGL_SPMV_DISABLE_GPU=1` to force CPU-only, at any point. |
 | `artifact_for(grg_path, out_dir, *, dtype)` | Convert a `.grg` for use in tests. A separate call from `load()` on purpose, so conversion stays visible; it does not cache, so call it from a session-scoped fixture. Names the artifact from the input's basename, so distinct sources need distinct `out_dir`s. |
 | `requirements(*, max_k=..., **fields)` | An everything-enabled `RuntimeRequirements`. Keyword names mirror the dataclass field for field. |
-| `load(artifact, *, backend, req, max_k, dtype, **kw)` | Context manager yielding one bound GRG. `load_reference` / `load_mkl` / `load_cusparse` are pinned shorthands. |
+| `load(artifact, *, backend, req, max_k, dtype, **kw)` | Context manager yielding one bound GRG. `load_reference` / `load_mkl` / `load_cusparse` / `load_rocsparse` are pinned shorthands. |
 | `load_many(artifacts, *, backend, ...)` | Context manager yielding one bound GRG per artifact, in order. |
 
-Backend-specific arguments go through `**kw` to the matching `make_backend_*` factory — `capture`, `native`, `device`, `allow_residency`, `vram_budget_mb` for cuSPARSE, `n_threads` and `optimize` for MKL, `plans` for reference. Passing one to a backend that cannot honour it raises `TypeError` rather than being ignored.
+Backend-specific arguments go through `**kw` to the matching `make_backend_*` factory — `capture`, `native`, `device`, `allow_residency`, `vram_budget_mb` for cuSPARSE; `capture`, `native`, `device`, `pair`, `shared_ones`, `allow_residency=True` for rocSPARSE; `n_threads` and `optimize` for MKL, `plans` for reference. Passing one to a backend that cannot honour it raises `TypeError` rather than being ignored.
 
 `capture=True` with only `max_k` captures just the default up/down pair. For a real application shape pass `req=make_runconfig_pca()` (or `_bolt` / `_gwas` / `_kernel`); otherwise a call like `by_individual=True` has no graph and raises.
 
-There is no `exit_stack` parameter: the loaders are context managers, and your test framework already owns the stack. Do not use a GRG after its `with` block — for captured (CUDA-graph) GRGs the underlying buffers are freed on exit, and calling `matmul` afterwards raises.
+There is no `exit_stack` parameter: the loaders are context managers, and your test framework already owns the stack. Do not use a GRG after its `with` block — for captured GRGs the underlying buffers are freed on exit, and calling `matmul` afterwards raises.
 
 `reference` is a pure NumPy/SciPy backend, always available, and is the parity oracle the others are checked against — useful as the expected value in your own tests.
 
@@ -280,9 +344,8 @@ There is no `exit_stack` parameter: the loaders are context managers, and your t
 - runtime-owned buffers are allocated in `__enter__()`
 - one runtime owns one shared execution arena across all `runtime.grgs`
 - concurrent calls on one runtime fail fast
-- cuSPARSE supports any declared `max_k >= 1`
-- GPU layouts can mix resident and streamed sparse blocks under a VRAM budget
-- `ring_buffer_size=0` is valid for GPU layouts only when the budget keeps every sparse block resident
+- both GPU backends support any declared `max_k >= 1`
+- CUDA layouts can mix resident and streamed sparse blocks under a VRAM budget
+- `ring_buffer_size=0` is valid for CUDA layouts only when the budget keeps every sparse block resident
 - the package root intentionally stays CPU-safe and does not re-export GPU runtime symbols
 - in `native=True` mode, `matmul` awaits only CuPy's *current* stream on the capture device, which is where a plain `cupy.asarray(...)` enqueues. Synchronize inputs yourself if you produce them on an explicit `cupy.cuda.Stream()`, or hand over a CuPy view of torch memory
-- native-mode missingness has an open `grapp`-side defect: see [docs/grapp-native-miss-issue.md](docs/grapp-native-miss-issue.md)

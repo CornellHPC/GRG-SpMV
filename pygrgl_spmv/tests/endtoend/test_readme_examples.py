@@ -26,12 +26,11 @@ import pytest
 from pygrgl_spmv import (
     load_grg_spmv_multi,
     load_grg_spmv_single,
-    make_backend_cusparse,
     make_runconfig_gwas,
     make_runconfig_pca,
 )
 
-pytestmark = [pytest.mark.cuda13, pytest.mark.cusparse]
+from pygrgl_spmv.tests.runtime._gpu import GPU_BACKENDS, backend_factory
 
 # "grapp", not "grapp.linalg": importing the latter here would pre-satisfy the circular
 # import the order test below exists to catch.
@@ -73,11 +72,12 @@ def two_artifacts(primary_artifact, tmp_path):
     return [str(primary_artifact), str(second)]
 
 
-def test_pca_example_runs(two_artifacts):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_pca_example_runs(two_artifacts, gpu_backend):
     from grapp.linalg import PCs                      # linalg first, per the README
     from grapp.grg_calculator import GRGSpMVCalculator
 
-    backend = make_backend_cusparse(device=0, capture=True)
+    backend = backend_factory(gpu_backend)(device=0, capture=True)
     req = make_runconfig_pca()
     with contextlib.ExitStack() as stack:
         grgs = [
@@ -89,13 +89,14 @@ def test_pca_example_runs(two_artifacts):
     assert list(pcs_df.columns)[0] == "PC1"
 
 
-def test_pca_example_with_include_eig_runs(two_artifacts):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_pca_example_with_include_eig_runs(two_artifacts, gpu_backend):
     """include_eig drives a width-k product, so maxk must cover it."""
     from grapp.linalg import PCs                      # linalg first, per the README
     from grapp.grg_calculator import GRGSpMVCalculator
 
     k = 3
-    backend = make_backend_cusparse(device=0, capture=True)
+    backend = backend_factory(gpu_backend)(device=0, capture=True)
     with contextlib.ExitStack() as stack:
         grgs = [
             GRGSpMVCalculator(g)
@@ -106,11 +107,12 @@ def test_pca_example_with_include_eig_runs(two_artifacts):
     assert pcs_df.shape[1] == k
 
 
-def test_summary_statistics_example_runs(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_summary_statistics_example_runs(missing_artifact, gpu_backend):
     from grapp.grg_calculator import GRGSpMVCalculator
     from grapp.util import allele_counts, allele_frequencies
 
-    backend = make_backend_cusparse(device=0, capture=True)
+    backend = backend_factory(gpu_backend)(device=0, capture=True)
     with contextlib.ExitStack() as stack:
         grg = GRGSpMVCalculator(
             load_grg_spmv_single(str(missing_artifact), backend, make_runconfig_gwas(), stack)
@@ -121,11 +123,12 @@ def test_summary_statistics_example_runs(missing_artifact):
     assert missing.sum() > 0, "fixture has no missingness; the example would be vacuous"
 
 
-def test_association_example_runs(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_association_example_runs(missing_artifact, gpu_backend):
     from grapp.assoc import linear_assoc_no_covar
     from grapp.grg_calculator import GRGSpMVCalculator
 
-    backend = make_backend_cusparse(device=0, capture=True)
+    backend = backend_factory(gpu_backend)(device=0, capture=True)
     with contextlib.ExitStack() as stack:
         grg = GRGSpMVCalculator(
             load_grg_spmv_single(str(missing_artifact), backend, make_runconfig_gwas(), stack)

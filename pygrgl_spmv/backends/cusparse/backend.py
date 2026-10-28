@@ -19,6 +19,8 @@ import scipy.sparse as sp
 from pygrgl_spmv.backends._cuda_stream import CudaStreamToken, _cuda_stream_device, parse_cuda_device, parse_cuda_stream
 from pygrgl_spmv.backends.base import (
     BudgetItem,
+    _SelectorLevels,
+    _selector_levels,
     _copy_struct_checked,
     _layout_struct_dtypes,
     _require_struct_dtype,
@@ -27,7 +29,6 @@ from pygrgl_spmv.backends.base import (
     materialize_sparse_block,
     relink_stream_dependencies,
     sparse_structure_lengths,
-    split_selector_by_level,
     stored_block_shape,
 )
 from pygrgl_spmv.backends.cusparse.ffi import (
@@ -38,7 +39,7 @@ from pygrgl_spmv.backends.cusparse.ffi import (
     cuda_dtype,
 )
 from pygrgl_spmv.backends.types import Direction, InitMode, SparseFormat, StoredMatrix
-from pygrgl_spmv.grg import BoundGRG, RuntimeRequirements, _CudaMatmulSpec
+from pygrgl_spmv.grg import BoundGRG, RuntimeRequirements, _GpuMatmulSpec
 from pygrgl_spmv.grg.artifact import ArtifactScan, _load_grg_spmv_host, iter_artifact_blocks, scan_grg_spmv
 
 from .plan import CusparsePlan, CusparsePlanPair, DenseOrder, Operation
@@ -186,13 +187,6 @@ class _CuOp:
     prev_in_slot: tuple[int, int] | None
 
 
-@dataclass(frozen=True)
-class _SelectorLevels:
-    rows_by_level: list[Any]
-    cols_by_level: list[Any]
-    row_unique: bool
-
-
 @dataclass
 class _DenseDescriptorSet:
     dst_descs: list[c_void_p]
@@ -245,7 +239,7 @@ def _dense_entries(artifact: _CuArtifact, direction: Direction) -> dict[int, _Pr
 
 
 class _CusparsePreparedMatmul:
-    def __init__(self, runtime: "CusparseRuntime", artifact: _CuArtifact, spec: _CudaMatmulSpec) -> None:
+    def __init__(self, runtime: "CusparseRuntime", artifact: _CuArtifact, spec: _GpuMatmulSpec) -> None:
         self._runtime = runtime
         self._artifact = artifact
         self._spec = spec
@@ -600,15 +594,6 @@ def _needs_explicit_source(plan: CusparsePlan) -> bool:
     return True
 
 
-def _selector_levels(cp, selector: sp.csr_matrix, level_offsets: np.ndarray) -> _SelectorLevels:
-    pairs = split_selector_by_level(selector, level_offsets)
-    return _SelectorLevels(
-        rows_by_level=[cp.asarray(rows) for rows, _ in pairs],
-        cols_by_level=[cp.asarray(cols) for _, cols in pairs],
-        row_unique=bool(np.all(np.diff(np.asarray(selector.indptr)) <= 1)),
-    )
-
-
 def _query_spmm_buffer_sizes(
     *,
     cp,
@@ -759,7 +744,10 @@ def plan_cusparse_layout(
     try:
         import cupy as cp
     except ImportError as exc:
-        raise ImportError("CuPy required: pip install cupy-cuda13x") from exc
+        raise ImportError(
+            "CuPy is required for the cuSPARSE backend; follow "
+            "https://github.com/CornellHPC/GRG-SpMV/tree/rocm-support#install"
+        ) from exc
 
     allow_residency = bool(allow_residency)
     device_id = parse_cuda_device(device)
@@ -1023,7 +1011,10 @@ class CusparseRuntime:
             import cupy as cp
             import cupyx
         except ImportError as exc:
-            raise ImportError("CuPy required: pip install cupy-cuda13x") from exc
+            raise ImportError(
+                "CuPy is required for the cuSPARSE backend; follow "
+                "https://github.com/CornellHPC/GRG-SpMV/tree/rocm-support#install"
+            ) from exc
         self._cp = cp
         self._cupyx = cupyx
         self.layout = layout
@@ -1401,7 +1392,9 @@ class CusparseRuntime:
             )
             raise
 
-    def _prepare_matmul_cuda(self, grg: BoundGRG, spec: _CudaMatmulSpec) -> _CusparsePreparedMatmul:
+    def _prepare_matmul_cuda(self, grg: BoundGRG, spec: _GpuMatmulSpec) -> _CusparsePreparedMatmul:
+        if not self._entered:
+            raise RuntimeError("CusparseRuntime must be entered before preparation")
         if spec.direction == Direction.UP and self.layout.pair.plan_up is None:
             raise ValueError("UP plan is not configured")
         if spec.direction == Direction.DOWN and self.layout.pair.plan_down is None:
@@ -1438,6 +1431,8 @@ class CusparseRuntime:
         return entry
 
     def _release_dense_descriptors(self, artifact: _CuArtifact, direction: Direction, k: int, entry: _PreparedDenseEntry) -> None:
+        if not self._entered:
+            return  # Runtime teardown already released the descriptors.
         key = int(k)
         entries = _dense_entries(artifact, direction)
         if entries.get(key) is not entry:
@@ -1706,7 +1701,7 @@ class CusparseRuntime:
             for event in ready[:h]:
                 self._root_stream.wait_event(event)
 
-    def _seed_prepared(self, artifact: _CuArtifact, spec: _CudaMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
+    def _seed_prepared(self, artifact: _CuArtifact, spec: _GpuMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
         level_bufs = self._up_level_bufs if spec.direction == Direction.UP else self._down_level_bufs
         assert level_bufs
         k = int(spec.k)
@@ -1761,7 +1756,7 @@ class CusparseRuntime:
     def _apply_endpoint_bias_prepared(
         self,
         artifact: _CuArtifact,
-        spec: _CudaMatmulSpec,
+        spec: _GpuMatmulSpec,
         prepared: _CusparsePreparedMatmul,
         output,
     ) -> None:
@@ -1783,7 +1778,7 @@ class CusparseRuntime:
         temp *= prepared._init_vector_internal[None, :]
         output += temp
 
-    def _write_prepared_output(self, artifact: _CuArtifact, spec: _CudaMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
+    def _write_prepared_output(self, artifact: _CuArtifact, spec: _GpuMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
         level_bufs = self._up_level_bufs if spec.direction == Direction.UP else self._down_level_bufs
         assert level_bufs
         k = int(spec.k)
@@ -1835,7 +1830,7 @@ class CusparseRuntime:
                 self._cp.copyto(prepared._output_internal[: artifact.state.num_samples, :k], level_bufs[0][: artifact.state.num_samples, :k])
                 self._apply_endpoint_bias_prepared(artifact, spec, prepared, prepared._output_internal)
 
-    def _execute_prepared(self, artifact: _CuArtifact, spec: _CudaMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
+    def _execute_prepared(self, artifact: _CuArtifact, spec: _GpuMatmulSpec, prepared: _CusparsePreparedMatmul) -> None:
         dense = prepared._dense_state
         if dense is None:
             raise RuntimeError("cuSPARSE prepared matmul must be entered before use")

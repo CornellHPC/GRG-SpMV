@@ -203,3 +203,19 @@ def relink_stream_dependencies(ops_by_level, *, direction: Direction):
             ops_by_level[dst_level][op_idx] = replace(op, prev_in_slot=prev_by_slot.get(int(slot)))
             prev_by_slot[int(slot)] = (dst_level, op_idx)
     return ops_by_level
+
+
+@dataclass(frozen=True)
+class _SelectorLevels:
+    rows_by_level: list[Any]
+    cols_by_level: list[Any]
+    row_unique: bool
+
+
+def _selector_levels(cp, selector: sp.csr_matrix, level_offsets: np.ndarray) -> _SelectorLevels:
+    pairs = split_selector_by_level(selector, level_offsets)
+    return _SelectorLevels(
+        rows_by_level=[cp.asarray(rows) for rows, _ in pairs],
+        cols_by_level=[cp.asarray(cols) for _, cols in pairs],
+        row_unique=bool(np.all(np.diff(np.asarray(selector.indptr)) <= 1)),
+    )

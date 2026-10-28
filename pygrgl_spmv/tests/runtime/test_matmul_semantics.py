@@ -5,17 +5,22 @@ import pygrgl
 import pytest
 
 from pygrgl_spmv import testing
+from pygrgl_spmv.tests.runtime._gpu import GPU_BACKENDS
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
 
 
-def _open_reference_grg(artifact, *, requirements=None, dtype=np.float64):
-    return testing.load_reference(artifact, req=requirements, dtype=dtype)
+@pytest.fixture(params=[pytest.param(b, id=b, marks=(() if b == "reference" else getattr(pytest.mark, b)))
+                        for b in testing.BACKENDS])
+def open_grg(request):
+    def load(artifact, *, requirements=None, dtype=np.float64):
+        return testing.load(artifact, backend=request.param, req=requirements, dtype=dtype)
+    return load
 
 
-def test_by_individual(primary_artifact, primary_grg):
+def test_by_individual(primary_artifact, primary_grg, open_grg):
     if primary_grg.num_individuals == primary_grg.num_samples:
         pytest.skip("fixture is not grouped by individuals")
-    with _open_reference_grg(primary_artifact) as grg:
+    with open_grg(primary_artifact) as grg:
         rng = np.random.default_rng(1101)
         rows = 5
         x_up = rng.standard_normal((rows, primary_grg.num_individuals), dtype=DATA_DTYPE)
@@ -35,8 +40,8 @@ def test_by_individual(primary_artifact, primary_grg):
         )
 
 
-def test_init_modes_both_directions(primary_artifact, primary_grg):
-    with _open_reference_grg(primary_artifact) as grg:
+def test_init_modes_both_directions(primary_artifact, primary_grg, open_grg):
+    with open_grg(primary_artifact) as grg:
         rng = np.random.default_rng(2203)
         rows = 4
         x_up = rng.standard_normal((rows, primary_grg.num_samples), dtype=DATA_DTYPE)
@@ -64,13 +69,13 @@ def test_init_modes_both_directions(primary_artifact, primary_grg):
             )
 
 
-def test_missing_input_output(missing_artifact, missing_grg):
+def test_missing_input_output(missing_artifact, missing_grg, open_grg):
     if not missing_grg.has_missing_data:
         pytest.skip("dataset has no missingness nodes")
     if missing_grg.num_individuals == missing_grg.num_samples:
         pytest.skip("fixture is not grouped by individuals")
 
-    with _open_reference_grg(missing_artifact) as grg:
+    with open_grg(missing_artifact) as grg:
         rng = np.random.default_rng(3303)
         rows = 3
         x_up = rng.standard_normal((rows, missing_grg.num_individuals), dtype=DATA_DTYPE)
@@ -116,8 +121,8 @@ def test_missing_input_output(missing_artifact, missing_grg):
         np.testing.assert_allclose(actual_down, expected_down, atol=atol, rtol=rtol)
 
 
-def test_bool_init_dtype_strict_behavior(primary_artifact):
-    with _open_reference_grg(primary_artifact) as grg:
+def test_bool_init_dtype_strict_behavior(primary_artifact, open_grg):
+    with open_grg(primary_artifact) as grg:
         rng = np.random.default_rng(5505)
         rows = 4
         up_bool = rng.integers(0, 2, size=(rows, grg.num_samples), dtype=np.int8).astype(bool)
@@ -161,8 +166,8 @@ def test_bool_init_dtype_strict_behavior(primary_artifact):
             grg.matmul(up_bool.astype(DATA_DTYPE), pygrgl.TraversalDirection.UP, init=init_vec_bool)
 
 
-def test_matmul_requires_numpy_array_inputs(primary_artifact):
-    with _open_reference_grg(primary_artifact) as grg:
+def test_matmul_requires_numpy_array_inputs(primary_artifact, open_grg):
+    with open_grg(primary_artifact) as grg:
         rows = 2
         x_up = np.ones((rows, grg.num_samples), dtype=DATA_DTYPE)
         miss_up = np.zeros((rows, grg.num_mutations), dtype=DATA_DTYPE)
@@ -176,7 +181,7 @@ def test_matmul_requires_numpy_array_inputs(primary_artifact):
             grg.matmul(x_up, pygrgl.TraversalDirection.UP, init=init_vec.tolist())
 
 
-def test_runtime_requirements_reject_undeclared_modes(primary_artifact):
+def test_runtime_requirements_reject_undeclared_modes(primary_artifact, open_grg):
     requirements = testing.requirements(
         max_k_up=1,
         max_k_down=1,
@@ -186,7 +191,7 @@ def test_runtime_requirements_reject_undeclared_modes(primary_artifact):
         need_init_matrix=False,
         need_init_xtx=False,
     )
-    with _open_reference_grg(primary_artifact, requirements=requirements) as grg:
+    with open_grg(primary_artifact, requirements=requirements) as grg:
         up = np.ones((1, grg.num_samples), dtype=DATA_DTYPE)
         down = np.ones((1, grg.num_mutations), dtype=DATA_DTYPE)
         miss = np.zeros((1, grg.num_mutations), dtype=DATA_DTYPE)
@@ -202,3 +207,34 @@ def test_runtime_requirements_reject_undeclared_modes(primary_artifact):
             with pytest.raises(ValueError, match="xtx"):
                 grg.matmul(up, "up", init="xtx")
 
+
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("k", [1, 3, 10])
+@pytest.mark.parametrize("capture", [False, True])
+def test_selector_reductions_with_empty_and_repeated_rows(missing_grg, tmp_path, dtype, k, capture, gpu_backend):
+    import scipy.sparse as sp
+    from pygrgl_spmv.grg import _build_init_biases
+    from pygrgl_spmv.grg.artifact import save_grg_spmv
+    from pygrgl_spmv.grg.compile import compile_grg
+
+    state = compile_grg(missing_grg)
+    # Empty mutations, two nodes for one mutation, and several mutations on
+    # the same node exercise both selector orientations and stale-output zeros.
+    state.sel_mut = sp.csr_matrix(
+        (np.ones(5, dtype=np.bool_), ([1, 1, 2, 3, 4],
+                                     [0, state.num_nodes - 1, 0, 0, state.num_nodes - 1])),
+        shape=(state.num_mutations, state.num_nodes),
+    )
+    _build_init_biases(state, np.dtype(dtype))
+    artifact = tmp_path / "selector-reductions.grg_spmv"
+    save_grg_spmv(state, artifact)
+    req = testing.requirements(max_k=k)
+    with testing.load_reference(artifact, req=req, dtype=dtype) as ref, \
+            testing.load(artifact, backend=gpu_backend, req=req, dtype=dtype, capture=capture) as grg:
+        rng = np.random.default_rng(9402)
+        for direction, n in (("up", state.num_samples), ("down", state.num_mutations)):
+            for _ in range(2):
+                x = rng.standard_normal((k, n)).astype(dtype)
+                np.testing.assert_allclose(grg.matmul(x, direction), ref.matmul(x, direction),
+                                           atol=tol(dtype)[0], rtol=tol(dtype)[1])

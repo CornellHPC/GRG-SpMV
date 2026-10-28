@@ -1,4 +1,4 @@
-"""Capture-key correctness for the adaptor's CUDA-graph path.
+"""Capture-key correctness for the adaptor's GPU-graph paths.
 
 This is the surface that used to return a plausible wrong number with no signal:
 ``CapturedBoundGRG._key`` degraded a cache miss to the plain graph, discarding the
@@ -24,7 +24,6 @@ from pygrgl_spmv import (
     RunConfigs,
     RuntimeRequirements,
     load_grg_spmv_single,
-    make_backend_cusparse,
     make_runconfig_bolt,
     make_runconfig_gwas,
     make_runconfig_kernel,
@@ -33,6 +32,7 @@ from pygrgl_spmv import (
 )
 from pygrgl_spmv.adaptor import _validate_capture_spec
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
+from pygrgl_spmv.tests.runtime._gpu import GPU_BACKENDS, backend_factory
 
 
 def _keys(runconfig) -> set[tuple]:
@@ -193,14 +193,14 @@ def test_force_spmm_widens_k_only_where_it_can():
 
 
 @contextlib.contextmanager
-def _pair(artifact, runconfig, device=0):
+def _pair(artifact, runconfig, gpu_backend, device=0):
     """Yield (eager, captured) GRGs for the same artifact and run configuration."""
     with contextlib.ExitStack() as stack:
         eager = load_grg_spmv_single(
-            artifact, make_backend_cusparse(device=device), runconfig, stack
+            artifact, backend_factory(gpu_backend)(device=device), runconfig, stack
         )
         captured = load_grg_spmv_single(
-            artifact, make_backend_cusparse(device=device, capture=True), runconfig, stack
+            artifact, backend_factory(gpu_backend)(device=device, capture=True), runconfig, stack
         )
         yield eager, captured
 
@@ -213,10 +213,9 @@ def _operand(grg, spec):
     return np.random.default_rng(9091).standard_normal((spec.k, cols), dtype=DATA_DTYPE)
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
 @pytest.mark.parametrize(("factory", "name"), _FACTORIES)
-def test_every_captured_key_matches_the_eager_path(missing_artifact, factory, name):
+def test_every_captured_key_matches_the_eager_path(missing_artifact, factory, name, gpu_backend):
     """Parity for the whole capture surface, on the fixture that has missingness.
 
     Compared per element with an absolute floor, never as a scalar fingerprint:
@@ -225,7 +224,7 @@ def test_every_captured_key_matches_the_eager_path(missing_artifact, factory, na
     """
     runconfig = factory()
     atol, rtol = tol(DATA_DTYPE)
-    with _pair(missing_artifact, runconfig) as (eager, captured):
+    with _pair(missing_artifact, runconfig, gpu_backend) as (eager, captured):
         for spec in runconfig.capture_ops:
             x = _operand(captured, spec)
             kwargs = {"by_individual": spec.by_individual}
@@ -248,26 +247,24 @@ def test_every_captured_key_matches_the_eager_path(missing_artifact, factory, na
             )
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_uncaptured_key_raises_instead_of_returning_the_no_init_answer(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_uncaptured_key_raises_instead_of_returning_the_no_init_answer(missing_artifact, gpu_backend):
     """The headline fix: this used to return a confidently wrong number."""
     runconfig = make_runconfig_pca()
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True), runconfig, stack
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True), runconfig, stack
         )
         x = np.zeros((1, grg.num_individuals), dtype=DATA_DTYPE)
-        with pytest.raises(ValueError, match="no CUDA graph was captured"):
+        with pytest.raises(ValueError, match="no graph was captured"):
             grg.matmul(x, "up", by_individual=True, init=np.array([3.0]))
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_uncaptured_key_error_names_both_sides(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_uncaptured_key_error_names_both_sides(missing_artifact, gpu_backend):
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True),
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True),
             make_runconfig_kernel("up", 1), stack
         )
         with pytest.raises(ValueError) as excinfo:
@@ -278,10 +275,9 @@ def test_uncaptured_key_error_names_both_sides(missing_artifact):
     assert "('up', False, 'none', False, False)" in message
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
 @pytest.mark.parametrize("payload", ["init", "miss"])
-def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload):
+def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload, gpu_backend):
     """A k-1 init against a k=2 input used to be silently duplicated."""
     runconfig = RunConfigs(
         req=RuntimeRequirements(
@@ -295,7 +291,7 @@ def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload)
     )
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True), runconfig, stack
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True), runconfig, stack
         )
         x = np.ones((2, grg.num_samples), dtype=DATA_DTYPE)
         kwargs = (
@@ -307,8 +303,7 @@ def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload)
             grg.matmul(x, "up", **kwargs)
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
 @pytest.mark.parametrize(
     "make_bad",
     [
@@ -316,25 +311,24 @@ def test_short_init_or_miss_is_rejected_not_broadcast(missing_artifact, payload)
         pytest.param(lambda g: np.zeros((0, g.num_samples), dtype=DATA_DTYPE), id="k-zero"),
     ],
 )
-def test_degenerate_input_shapes_raise_like_the_eager_path(missing_artifact, make_bad):
+def test_degenerate_input_shapes_raise_like_the_eager_path(missing_artifact, make_bad, gpu_backend):
     """Used to raise IndexError, and to return a silently empty answer, where the
     eager path raises ValueError for both."""
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True),
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True),
             make_runconfig_pca(maxk=2), stack,
         )
         with pytest.raises(ValueError):
             grg.matmul(make_bad(grg), "up")
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_short_input_is_still_zero_padded_and_truncated(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_short_input_is_still_zero_padded_and_truncated(missing_artifact, gpu_backend):
     """The pad/truncate path is load-bearing for any block solver that varies k."""
     runconfig = make_runconfig_pca(maxk=4)
     atol, rtol = tol(DATA_DTYPE)
-    with _pair(missing_artifact, runconfig) as (eager, captured):
+    with _pair(missing_artifact, runconfig, gpu_backend) as (eager, captured):
         for k in (1, 2, 3, 4):
             x = np.random.default_rng(31).standard_normal((k, captured.num_samples), dtype=DATA_DTYPE)
             got = captured.matmul(x, "up")
@@ -342,10 +336,9 @@ def test_short_input_is_still_zero_padded_and_truncated(missing_artifact):
             np.testing.assert_allclose(got, eager.matmul(x, "up"), atol=atol, rtol=rtol)
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
 @pytest.mark.parametrize("direction", ["up", "down"])
-def test_emit_all_nodes_is_supported_when_captured(missing_artifact, missing_grg, direction):
+def test_emit_all_nodes_is_supported_when_captured(missing_artifact, missing_grg, direction, gpu_backend):
     """It used to be an ``assert``, which python -O strips.
 
     grapp forwards the flag, so under -O a caller asking for all-node output
@@ -365,7 +358,7 @@ def test_emit_all_nodes_is_supported_when_captured(missing_artifact, missing_grg
     atol, rtol = tol(DATA_DTYPE)
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True), runconfig, stack
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True), runconfig, stack
         )
         got = grg.matmul(x, direction, emit_all_nodes=True)
     assert got.shape == (2, missing_grg.num_nodes)
@@ -374,41 +367,38 @@ def test_emit_all_nodes_is_supported_when_captured(missing_artifact, missing_grg
     np.testing.assert_allclose(got, expected, atol=atol, rtol=rtol)
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_emit_all_nodes_raises_when_not_captured(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_emit_all_nodes_raises_when_not_captured(missing_artifact, gpu_backend):
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True),
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True),
             make_runconfig_pca(), stack
         )
         with pytest.raises(ValueError, match="emit_all_nodes=True"):
             grg.matmul(np.ones((1, grg.num_samples), dtype=DATA_DTYPE), "up", emit_all_nodes=True)
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_load_many_returns_grgs_in_input_order(missing_artifact, primary_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_load_many_returns_grgs_in_input_order(missing_artifact, primary_artifact, gpu_backend):
     """mikado zips chromosome labels against this list positionally."""
     from pygrgl_spmv import load_grg_spmv_multi
 
     paths = [missing_artifact, primary_artifact, missing_artifact]
     with contextlib.ExitStack() as stack:
         grgs = load_grg_spmv_multi(
-            paths, make_backend_cusparse(device=0), make_runconfig_kernel("up", 1), stack
+            paths, backend_factory(gpu_backend)(device=0), make_runconfig_kernel("up", 1), stack
         )
     assert [g.artifact_path for g in grgs] == paths
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_same_device_grgs_share_one_lock_and_runtime(missing_artifact, primary_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_same_device_grgs_share_one_lock_and_runtime(missing_artifact, primary_artifact, gpu_backend):
     from pygrgl_spmv import load_grg_spmv_multi
 
     with contextlib.ExitStack() as stack:
         grgs = load_grg_spmv_multi(
             [missing_artifact, primary_artifact],
-            make_backend_cusparse(device=0, capture=True),
+            backend_factory(gpu_backend)(device=0, capture=True),
             make_runconfig_kernel("up", 1),
             stack,
         )
@@ -416,14 +406,13 @@ def test_same_device_grgs_share_one_lock_and_runtime(missing_artifact, primary_a
         assert grgs[0]._grg._runtime is grgs[1]._grg._runtime
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_release_drops_the_graphs_and_staging_buffers(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_release_drops_the_graphs_and_staging_buffers(missing_artifact, gpu_backend):
     """The release hook used to set a bool and nothing else, so a retained handle
     pinned the graph pools and staging arenas: measured +46 MiB per load.
 
     Hand-rolled rather than a make_runconfig_* factory because no factory populates
-    _init_tensors: only vector/matrix init is staged, and xtx is not. Under
+    _init_buffers: only vector/matrix init is staged, and xtx is not. Under
     make_runconfig_pca two of the five assertions below held before release too.
     """
     runconfig = RunConfigs(
@@ -437,10 +426,10 @@ def test_release_drops_the_graphs_and_staging_buffers(missing_artifact):
             CaptureSpec("up", 2),
         ),
     )
-    owned_names = ("_graphs", "_src_tensors", "_init_tensors", "_miss_tensors", "_prepared_ops")
+    owned_names = ("_graphs", "_src_buffers", "_init_buffers", "_miss_buffers", "_prepared_ops")
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True), runconfig, stack
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True), runconfig, stack
         )
         for name in owned_names:
             assert getattr(grg, name), f"{name} empty before release; the check below is vacuous"
@@ -449,7 +438,6 @@ def test_release_drops_the_graphs_and_staging_buffers(missing_artifact):
         assert getattr(grg, name) == {}
 
 
-@pytest.mark.cuda13
 @pytest.mark.cusparse
 def test_up_only_missingness_allocates_no_miss_staging_buffer(missing_artifact, monkeypatch):
     """Sizing shared_miss from UP reserved k * num_mutations that nothing aliased."""
@@ -458,7 +446,7 @@ def test_up_only_missingness_allocates_no_miss_staging_buffer(missing_artifact, 
     assert runconfig.req.need_up_miss_output and not runconfig.req.need_down_miss_input
 
     # shared_miss is a local in _capture_grg and never reaches the wrapper when no DOWN
-    # spec aliases it, so _miss_tensors == {} holds either way. Watch the allocation
+    # spec aliases it, so _miss_buffers == {} holds either way. Watch the allocation
     # itself: sizing it from UP would ask for exactly k * num_mutations elements.
     import torch
 
@@ -473,10 +461,10 @@ def test_up_only_missingness_allocates_no_miss_staging_buffer(missing_artifact, 
     monkeypatch.setattr(torch, "zeros", recording_zeros)
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True), runconfig, stack
+            missing_artifact, backend_factory("cusparse")(device=0, capture=True), runconfig, stack
         )
         monkeypatch.undo()
-        assert grg._miss_tensors == {}
+        assert grg._miss_buffers == {}
         forbidden = 2 * grg.num_mutations
         assert sizes, "no flat torch.zeros seen; the watch is not wired up"
         assert forbidden not in sizes, (
@@ -488,14 +476,13 @@ def test_up_only_missingness_allocates_no_miss_staging_buffer(missing_artifact, 
         assert miss.sum() > 0, "fixture has no missingness; the test would be vacuous"
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
-def test_captured_miss_with_emit_all_nodes_fails_like_the_eager_path(missing_artifact):
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_captured_miss_with_emit_all_nodes_fails_like_the_eager_path(missing_artifact, gpu_backend):
     """grapp forwards both flags, and strict _key would answer with a wrong exception
-    type and a remedy that _prepare_cuda_spec refuses to build."""
+    type and a remedy that _prepare_gpu_spec refuses to build."""
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            missing_artifact, make_backend_cusparse(device=0, capture=True),
+            missing_artifact, backend_factory(gpu_backend)(device=0, capture=True),
             make_runconfig_gwas(maxk=1), stack,
         )
         x = np.ones((1, grg.num_samples), dtype=DATA_DTYPE)
@@ -517,10 +504,9 @@ _INIT_VECTOR_RUNCONFIG = RunConfigs(
 )
 
 
-@pytest.mark.cuda13
-@pytest.mark.cusparse
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
 @pytest.mark.parametrize("payload", ["init", "miss"])
-def test_init_and_miss_must_share_the_inputs_dtype(primary_artifact, missing_artifact, payload):
+def test_init_and_miss_must_share_the_inputs_dtype(primary_artifact, missing_artifact, payload, gpu_backend):
     """An int32 input with a float64 init used to be accepted and then truncated to the
     int32 output, losing the init's fractional part with no signal -- verified as
     [135 494 225 197] where float64 gives [135.5 494. 225.5 197.]. Both arrays are
@@ -530,7 +516,7 @@ def test_init_and_miss_must_share_the_inputs_dtype(primary_artifact, missing_art
     artifact = missing_artifact if payload == "miss" else primary_artifact
     with contextlib.ExitStack() as stack:
         grg = load_grg_spmv_single(
-            artifact, make_backend_cusparse(device=0, capture=True), _INIT_VECTOR_RUNCONFIG, stack
+            artifact, backend_factory(gpu_backend)(device=0, capture=True), _INIT_VECTOR_RUNCONFIG, stack
         )
         int_x = np.ones((1, grg.num_samples), dtype=np.int32)
         f64_x = np.ones((1, grg.num_samples), dtype=DATA_DTYPE)
@@ -552,3 +538,48 @@ def test_init_and_miss_must_share_the_inputs_dtype(primary_artifact, missing_art
         call(f64_x, np.float64)
         call(int_x, np.int32)
         assert grg.matmul(int_x, "up").dtype == np.int32
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("gpu_backend", GPU_BACKENDS)
+def test_native_capture_mixed_width_streams_and_teardown(primary_artifact, missing_artifact, dtype, gpu_backend):
+    _check_native_capture_mixed_width_streams_and_teardown(
+        primary_artifact, missing_artifact, dtype, gpu_backend)
+
+
+def _check_native_capture_mixed_width_streams_and_teardown(
+        primary_artifact, missing_artifact, dtype, gpu_backend, pair=None):
+    import cupy as cp
+    from pygrgl_spmv import load_grg_spmv_multi, testing
+
+    specs = (CaptureSpec("up", 1), CaptureSpec("down", 4), CaptureSpec("up", 4, use_miss=True),
+             CaptureSpec("down", 1, init_mode="vector"))
+    req = testing.requirements(max_k=4)
+    with contextlib.ExitStack() as stack:
+        grgs = load_grg_spmv_multi([primary_artifact, missing_artifact],
+                    backend_factory(gpu_backend)(capture=True, native=True, **({} if pair is None else {"pair": pair})),
+                    RunConfigs(req, specs), stack, dtype=dtype)
+        for grg, path in zip(grgs, [primary_artifact, missing_artifact]):
+            ref = stack.enter_context(testing.load_reference(path, req=req, dtype=dtype))
+            for spec in specs:
+                n = ref.num_samples if spec.direction == "up" else ref.num_mutations
+                host = np.random.default_rng(8).normal(size=(spec.k, n)).astype(dtype)
+                stream = cp.cuda.Stream(non_blocking=True)
+                with stream:
+                    x = cp.asarray(host) * 2
+                    kwargs, refkwargs = {}, {}
+                    if spec.use_miss:
+                        kwargs["miss"] = cp.ones((spec.k, ref.num_mutations), dtype=dtype)
+                        refkwargs["miss"] = np.ones((spec.k, ref.num_mutations), dtype=dtype)
+                    if spec.init_mode == "vector":
+                        kwargs["init"] = cp.ones(spec.k, dtype=dtype)
+                        refkwargs["init"] = np.ones(spec.k, dtype=dtype)
+                    result = grg.matmul(x, spec.direction, **kwargs)
+                np.testing.assert_allclose(cp.asnumpy(result), ref.matmul(host * 2, spec.direction, **refkwargs), atol=tol(dtype)[0], rtol=tol(dtype)[1])
+                if spec.use_miss:
+                    np.testing.assert_allclose(cp.asnumpy(kwargs["miss"]), refkwargs["miss"], atol=tol(dtype)[0], rtol=tol(dtype)[1])
+            with pytest.raises(TypeError, match="cupy.ndarray"):
+                grg.matmul(np.ones((1, ref.num_samples), dtype=dtype), "up")
+    assert not grg._graphs
+    with pytest.raises(RuntimeError, match="released"):
+        grg.matmul(cp.ones((1, grg.num_samples), dtype=dtype), "up")

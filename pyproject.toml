@@ -25,13 +25,16 @@ dependencies = [
     "numpy>=1.26.0",
     "pygrgl>=2.6",
     "scipy>=1.10.0",
+    "cupy @ git+https://github.com/cupy/cupy.git@9aac5cf188c24adf2e6c5051278a1491d0101a1f ; extra == 'cuda13' or extra == 'rocm10'",
 ]
 
 [project.optional-dependencies]
-# Named for the accelerator it targets, not generically: a future ROCm or oneAPI
-# backend gets its own extra rather than colliding with a catch-all "gpu".
+rocm10 = [
+    "rocm-bindings-hip==10.0.0.0.1.2",
+    "rocm-bindings-core==10.0.0.0.1.2",
+]
+
 cuda13 = [
-    "cupy-cuda13x>=13.6.0",
     # torch is the CUDA-graph implementation behind capture=True (CUDAGraph, as_strided,
     # the capture stream) -- unrelated to the removed Triton backend. It drags triton in
     # transitively for its own inductor; that is torch's dependency, not ours.
@@ -55,14 +58,15 @@ exclude = [
     "pygrgl_spmv/**/__pycache__/**",
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/pygrgl_spmv",
     "/pyproject.toml",
     "/README.md",
     "/LICENSE",
-    # README links into this; without it the sdist ships a dead link.
-    "/docs",
 ]
 exclude = [
     "/pygrgl_spmv/tests/**",
@@ -77,9 +81,9 @@ testpaths = [
 ]
 markers = [
     "stress: long streamed GPU stress tests",
-    "cuda13: tests requiring a CUDA 13 GPU (CuPy + cuSPARSE)",
     "mkl: tests specific to MKL backend",
     "cusparse: tests specific to cuSPARSE backend",
+    "rocsparse: tests specific to rocSPARSE backend",
 ]
 
 [tool.pyright]

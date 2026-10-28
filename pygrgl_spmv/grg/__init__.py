@@ -41,7 +41,7 @@ class RuntimeRequirements:
 
 
 @dataclass(frozen=True)
-class _CudaMatmulSpec:
+class _GpuMatmulSpec:
     direction: Direction
     k: int
     emit_all_nodes: bool
@@ -52,6 +52,10 @@ class _CudaMatmulSpec:
     input_cols: int
     output_cols: int
     apply_endpoint_bias: bool
+
+
+# Compatibility for callers using the original CUDA spec name.
+_CudaMatmulSpec = _GpuMatmulSpec
 
 
 def _decode_allele(data: np.ndarray, offsets: np.ndarray, idx: int) -> str:
@@ -451,7 +455,7 @@ class BoundGRG:
         reordered = node_values[self.inv_node_perm]
         return reordered.T.astype(self._dtype, copy=False)
 
-    def _prepare_cuda_spec(
+    def _prepare_gpu_spec(
         self,
         *,
         direction: str | Direction | pygrgl.TraversalDirection,
@@ -460,7 +464,7 @@ class BoundGRG:
         by_individual: bool,
         init_mode: str | InitMode,
         use_miss: bool,
-    ) -> _CudaMatmulSpec:
+    ) -> _GpuMatmulSpec:
         direction_name = self._parse_direction(direction)
         init_mode_name = parse_init_mode(init_mode)
         rows = int(k)
@@ -500,7 +504,7 @@ class BoundGRG:
             if emit_all_nodes or init_mode_name == InitMode.MATRIX
             else InitMode.NONE
         )
-        return _CudaMatmulSpec(
+        return _GpuMatmulSpec(
             direction=direction_name,
             k=rows,
             emit_all_nodes=bool(emit_all_nodes),
@@ -551,7 +555,30 @@ class BoundGRG:
         prepare = getattr(self._runtime, "_prepare_matmul_cuda", None)
         if prepare is None:
             raise NotImplementedError("prepare_matmul_cuda() is implemented only for CUDA backends")
-        spec = self._prepare_cuda_spec(
+        spec = self._prepare_gpu_spec(
+            direction=direction,
+            k=int(k),
+            emit_all_nodes=bool(emit_all_nodes),
+            by_individual=bool(by_individual),
+            init_mode=init_mode,
+            use_miss=bool(use_miss),
+        )
+        return prepare(self, spec)
+
+    def prepare_matmul_rocm(
+        self,
+        *,
+        direction,
+        k: int,
+        emit_all_nodes: bool = False,
+        by_individual: bool = False,
+        init_mode: str | InitMode = "none",
+        use_miss: bool = False,
+    ):
+        prepare = getattr(self._runtime, "_prepare_matmul_rocm", None)
+        if prepare is None:
+            raise NotImplementedError("prepare_matmul_rocm() is implemented only for ROCm backends")
+        spec = self._prepare_gpu_spec(
             direction=direction,
             k=int(k),
             emit_all_nodes=bool(emit_all_nodes),
@@ -595,9 +622,31 @@ class BoundGRG:
         if init is not None and miss is not None:
             raise ValueError('the "miss" parameter cannot be mixed with the "init" parameter')
 
+        if getattr(self._runtime, "_prepare_matmul_rocm", None) is not None:
+            init_mode, init_payload = self._parse_init(init, rows, x_in.dtype, reorder_matrix=False)
+            miss_matrix = None if miss is None else self._validate_miss(miss, rows, direction_name, x_in.dtype)
+            with self._runtime._call_scope(), self._runtime._caller_stream:
+                with self.prepare_matmul_rocm(
+                    direction=direction_name, k=rows, emit_all_nodes=emit_all_nodes,
+                    by_individual=by_individual, init_mode=init_mode, use_miss=miss is not None,
+                ) as op:
+                    cp = self._runtime._cp
+                    cp.copyto(op.input, cp.asarray(x_in, dtype=self._dtype))
+                    if direction_name == Direction.DOWN and miss_matrix is not None:
+                        cp.copyto(op.miss_input, cp.asarray(miss_matrix, dtype=self._dtype))
+                    if init_mode == InitMode.VECTOR:
+                        cp.copyto(op.init_vector, cp.asarray(init_payload, dtype=self._dtype))
+                    elif init_mode == InitMode.MATRIX:
+                        cp.copyto(op.init_matrix, cp.asarray(init_payload, dtype=self._dtype))
+                    op._call_prelocked()
+                    result = cp.asnumpy(op.output)
+                    if direction_name == Direction.UP and miss_matrix is not None:
+                        miss_matrix += cp.asnumpy(op.miss_output).astype(miss_matrix.dtype, copy=False)
+                    return result
+
         if getattr(self._runtime, "_prepare_matmul_cuda", None) is not None:
             init_mode, init_payload = self._parse_init(init, rows, x_in.dtype, reorder_matrix=False)
-            spec = self._prepare_cuda_spec(
+            spec = self._prepare_gpu_spec(
                 direction=direction_name,
                 k=rows,
                 emit_all_nodes=bool(emit_all_nodes),
