@@ -24,8 +24,8 @@ from .vmm import SharedOnes
 
 def standard_pair():
     return RocsparsePlanPair(
-        RocsparsePlan("N", "CSR", "N", "N", "ROW", "ROW", "CSR_ROW_SPLIT"),
-        RocsparsePlan("T", "CSC", "N", "N", "ROW", "ROW", "DEFAULT"),
+        RocsparsePlan("N", "CSR", "N", "N", "ROW", "ROW", "CSR_ROW_SPLIT", spmv="DEFAULT"),
+        RocsparsePlan("T", "CSC", "N", "N", "ROW", "ROW", "DEFAULT", spmv="CSR_NNZSPLIT"),
     )
 
 
@@ -102,7 +102,7 @@ class _Block:
 class _DirectionState:
     levels: list
     sources: list
-    operations: list = field(default_factory=list)
+    operations_by_destination: list = field(default_factory=list)
     refs: int = 0
     streams: list = field(default_factory=list)
     handles: list = field(default_factory=list)
@@ -112,9 +112,10 @@ class _DirectionState:
     def close(self):
         for stream in self.streams:
             stream.synchronize()
-        for _, _, operation in self.operations:
-            operation.close()
-        self.operations.clear()
+        for operations in self.operations_by_destination:
+            for _, operation in operations:
+                operation.close()
+        self.operations_by_destination.clear()
         for handle in self.handles:
             handle.close()
         self.handles.clear()
@@ -368,6 +369,7 @@ class RocsparseRuntime:
                 # crash). Each prepared state owns its streams and handles,
                 # just as it owns descriptors and preprocessing workspaces.
                 dense = _DirectionState(levels, sources,
+                    operations_by_destination=[[] for _ in levels],
                     streams=[cp.cuda.Stream(non_blocking=True) for _ in levels],
                     ready=[cp.cuda.Event(disable_timing=True) for _ in levels],
                     launch=cp.cuda.Event(disable_timing=True))
@@ -379,7 +381,7 @@ class RocsparseRuntime:
                         with dense.streams[dst]:
                             operation = SparseOperation(dense.handles[dst], dense.streams[dst], block,
                                                         self._shared_ones, sources[src], levels[dst], plan)
-                        dense.operations.append((dst, src, operation))
+                        dense.operations_by_destination[dst].append((src, operation))
                 except BaseException:
                     dense.close()
                     raise
@@ -411,10 +413,9 @@ class RocsparseRuntime:
         for dst in order:
             stream = dense.streams[dst]
             with stream:
-                for destination, src, operation in dense.operations:
-                    if destination == dst:
-                        stream.wait_event(dense.ready[src])
-                        operation()
+                for src, operation in dense.operations_by_destination[dst]:
+                    stream.wait_event(dense.ready[src])
+                    operation()
                 view = dense.levels[dst] if plan.op_b == Operation.N else dense.levels[dst].T
                 if view.data.ptr != dense.sources[dst].data.ptr:
                     cp.copyto(dense.sources[dst], view)

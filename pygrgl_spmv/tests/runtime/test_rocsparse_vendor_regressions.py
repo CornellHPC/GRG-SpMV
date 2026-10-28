@@ -6,6 +6,19 @@ from pathlib import Path
 
 import pytest
 
+from dataclasses import replace
+from types import SimpleNamespace
+
+import numpy as np
+import scipy.sparse as sp
+
+from pygrgl_spmv.backends.types import SparseFormat
+from pygrgl_spmv.backends.rocsparse.backend import standard_pair
+from pygrgl_spmv.backends.rocsparse.ffi import Handle
+from pygrgl_spmv.backends.rocsparse.operations import SparseOperation
+from pygrgl_spmv.backends.rocsparse.vmm import SharedOnes
+
+
 from pygrgl_spmv.backends.rocsparse import ffi
 
 
@@ -70,3 +83,50 @@ def test_failed_capture_drops_graphs_before_stack_unwinds(primary_artifact):
     assert len(frames) == 1
     assert frames[0]["graphs"] == {}
     assert frames[0]["graph"] is None
+
+
+@pytest.mark.rocsparse
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("k", [1, 2, 10])
+@pytest.mark.parametrize("algo", ["DEFAULT", "CSR", "CSR_NNZ_SPLIT", "CSR_ROW_SPLIT", "CSR_MERGE_PATH"])
+def test_sparse_first_row_accumulated_once(dtype, k, algo):
+    blocked = k <= 2 and algo in {"DEFAULT", "CSR", "CSR_NNZ_SPLIT"}
+    _check_sparse_first_row(dtype, k, algo, None, blocked)
+
+
+@pytest.mark.rocsparse
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("spmv", ["DEFAULT", "CSR_ADAPTIVE", "CSR_ROWSPLIT", "CSR_LRB", "CSR_NNZSPLIT"])
+def test_native_spmv_first_row_accumulated_once(dtype, spmv):
+    _check_sparse_first_row(dtype, 1, "CSR_ROW_SPLIT", spmv, spmv == "CSR_NNZSPLIT")
+
+
+def _check_sparse_first_row(dtype, k, algo, spmv, blocked):
+    import cupy as cp
+
+    # ROCm 10.1 NNZ-split adds row 0 twice at widths 1/2 on this six-edge
+    # matrix. DEFAULT and CSR dispatch to the same affected implementation.
+    a = sp.csr_matrix((np.ones(6), ([0, 0, 0, 0, 1, 39], [0, 1, 2, 3, 4, 5])), shape=(124, 10))
+    block = SimpleNamespace(struct0=cp.asarray(a.indptr), struct1=cp.asarray(a.indices),
+                            nrows=124, ncols=10, nnz=6, fmt=SparseFormat.CSR)
+    stream = cp.cuda.get_current_stream()
+    handle = Handle(stream)
+    ones = SharedOnes(6, dtype, 0, "materialized")
+    op = None
+    try:
+        source, destination = cp.ones((10, k), dtype=dtype), cp.ones((124, k), dtype=dtype)
+        plan = replace(standard_pair().plan_up, algo=algo, spmv=spmv)
+        if blocked:
+            with pytest.raises(ValueError, match="incorrect"):
+                SparseOperation(handle, stream, block, ones, source, destination, plan)
+        else:
+            op = SparseOperation(handle, stream, block, ones, source, destination, plan)
+            assert op.is_vector is (spmv is not None and k == 1)
+            op()
+            stream.synchronize()
+            np.testing.assert_array_equal(cp.asnumpy(destination), a @ np.ones((10, k)) + 1)
+    finally:
+        if op is not None:
+            op.close()
+        ones.close()
+        handle.close()

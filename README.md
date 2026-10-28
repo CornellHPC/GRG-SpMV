@@ -269,17 +269,33 @@ with CusparseRuntime(layout) as runtime:
 Everything in `pygrgl_spmv.__all__`, grouped by role:
 
 - **Conversion** — `simple_convert(input_path, output_path, *, dtype=float64) -> Path`
-- **Adaptor (the front door)** — `make_backend_mkl`, `make_backend_cusparse`, `make_runconfig_kernel`, `make_runconfig_pca`, `make_runconfig_bolt`, `make_runconfig_gwas`, `load_grg_spmv_single`, `load_grg_spmv_multi`
-- **Adaptor value objects** — `MklBackendConfig`, `CusparseBackendConfig`, `RunConfigs`, `CaptureSpec`, `CapturedBoundGRG`
+- **Adaptor (the front door)** — `make_backend_mkl`, `make_backend_cusparse`, `make_backend_rocsparse`, `make_runconfig_kernel`, `make_runconfig_pca`, `make_runconfig_bolt`, `make_runconfig_gwas`, `load_grg_spmv_single`, `load_grg_spmv_multi`
+- **Adaptor value objects** — `MklBackendConfig`, `CusparseBackendConfig`, `RocsparseBackendConfig`, `RunConfigs`, `CaptureSpec`, `CapturedBoundGRG`
 - **Lower-level planning/execution** — `RuntimeRequirements`, `plan_reference_layout` + `ReferenceRuntime` + `ReferencePlan` + `ReferencePlanPair`, `plan_mkl_layout` + `MklRuntime` + `MklPlan` + `MklPlanPair`
 
 Not re-exported from the root, on purpose:
 
-- The cuSPARSE planner and runtime live in `pygrgl_spmv.backends.cusparse`, so that `import pygrgl_spmv` stays CPU-safe and works with CuPy and torch absent.
+- GPU planners and runtimes live in `pygrgl_spmv.backends.cusparse` and `pygrgl_spmv.backends.rocsparse`, so that `import pygrgl_spmv` stays CPU-safe and works with CuPy and torch absent.
 - Test helpers live in `pygrgl_spmv.testing` (see [Testing Against pygrgl-spmv](#testing-against-pygrgl-spmv)).
 - `BoundGRG` is the class every loaded GRG actually is, but it is only ever obtained from a runtime or a loader, never constructed directly.
 
-GPU execution is centered on `grg.prepare_matmul_cuda(...)`; eager `grg.matmul(...)` is a NumPy convenience wrapper over that prepared path.
+GPU execution uses `prepare_matmul_cuda(...)` or `prepare_matmul_rocm(...)`; eager `matmul(...)` wraps the same prepared operation with NumPy I/O.
+
+| Backend | Planner / runtime | Prepared buffers | Copy input / return output |
+|---|---|---|---|
+| cuSPARSE | `plan_cusparse_layout` / `CusparseRuntime` | Torch | `op.input.copy_(...)` / `op.output.cpu().numpy()` |
+| rocSPARSE | `plan_rocsparse_layout` / `RocsparseRuntime` | CuPy | `cp.copyto(op.input, cp.asarray(x))` / `cp.asnumpy(op.output)` |
+
+ROCm plans use the same store/format/op/dense-order fields as CUDA. Their optional
+`spmv` algorithm applies only at width one; `spmv=None` always uses SpMM `algo`.
+The default pair uses CSR row-split SpMM / default SpMV upward and shared CSC
+SpMM / transpose NNZ-split SpMV downward. Unsupported vendor combinations raise;
+ROCm 10.1's incorrect normal-CSR NNZ-split SpMV and widths 1/2 NNZ-split SpMM
+(including DEFAULT/CSR) are rejected. Empty blocks are no-ops.
+
+The parallel benchmark entry points `python -m scripts.bench.cusparse` and
+`python -m scripts.bench.rocsparse` accept `--artifact`, `--direction`, `--k`,
+`--warmup`, `--trials` and an optional JSON `--plan`.
 
 ## Testing Against pygrgl-spmv
 
@@ -307,18 +323,18 @@ grg = self.enterContext(spmv_test.load(artifact, backend=backend, max_k=4))
 
 | Function | Purpose |
 |---|---|
-| `available_backends()` | Backends usable in this process, e.g. `("reference", "mkl", "cusparse")`. Parameterize over this instead of writing per-backend `skipif`s. |
-| `is_mkl_available()`, `is_cusparse_available()`, `is_available(backend)` | Individual predicates. Cached, and deliberately fork-safe — they do not initialise the CUDA driver, so `multiprocessing` in a consumer's suite keeps working. Set `PYGRGL_SPMV_DISABLE_GPU=1` to force CPU-only, at any point. |
+| `available_backends()` | Backends usable in this process, a subset of `reference`, `mkl`, `cusparse`, `rocsparse`. Parameterize over this instead of writing per-backend `skipif`s. |
+| `is_mkl_available()`, `is_cusparse_available()`, `is_rocsparse_available()`, `is_available(backend)` | Individual predicates. Cached, and deliberately fork-safe — they do not initialise a GPU driver in the parent, so `multiprocessing` in a consumer's suite keeps working. Set `PYGRGL_SPMV_DISABLE_GPU=1` to force CPU-only, at any point. |
 | `artifact_for(grg_path, out_dir, *, dtype)` | Convert a `.grg` for use in tests. A separate call from `load()` on purpose, so conversion stays visible; it does not cache, so call it from a session-scoped fixture. Names the artifact from the input's basename, so distinct sources need distinct `out_dir`s. |
 | `requirements(*, max_k=..., **fields)` | An everything-enabled `RuntimeRequirements`. Keyword names mirror the dataclass field for field. |
-| `load(artifact, *, backend, req, max_k, dtype, **kw)` | Context manager yielding one bound GRG. `load_reference` / `load_mkl` / `load_cusparse` are pinned shorthands. |
+| `load(artifact, *, backend, req, max_k, dtype, **kw)` | Context manager yielding one bound GRG. `load_reference` / `load_mkl` / `load_cusparse` / `load_rocsparse` are pinned shorthands. |
 | `load_many(artifacts, *, backend, ...)` | Context manager yielding one bound GRG per artifact, in order. |
 
-Backend-specific arguments go through `**kw` to the matching `make_backend_*` factory — `capture`, `native`, `device`, `allow_residency`, `vram_budget_mb` for cuSPARSE, `n_threads` and `optimize` for MKL, `plans` for reference. Passing one to a backend that cannot honour it raises `TypeError` rather than being ignored.
+Backend-specific arguments go through `**kw` to the matching `make_backend_*` factory — `capture`, `native`, `device`, `allow_residency`, `vram_budget_mb` for cuSPARSE; `capture`, `native`, `device`, `pair`, `shared_ones`, `allow_residency=True` for rocSPARSE; `n_threads` and `optimize` for MKL, `plans` for reference. Passing one to a backend that cannot honour it raises `TypeError` rather than being ignored.
 
 `capture=True` with only `max_k` captures just the default up/down pair. For a real application shape pass `req=make_runconfig_pca()` (or `_bolt` / `_gwas` / `_kernel`); otherwise a call like `by_individual=True` has no graph and raises.
 
-There is no `exit_stack` parameter: the loaders are context managers, and your test framework already owns the stack. Do not use a GRG after its `with` block — for captured (CUDA-graph) GRGs the underlying buffers are freed on exit, and calling `matmul` afterwards raises.
+There is no `exit_stack` parameter: the loaders are context managers, and your test framework already owns the stack. Do not use a GRG after its `with` block — for captured GRGs the underlying buffers are freed on exit, and calling `matmul` afterwards raises.
 
 `reference` is a pure NumPy/SciPy backend, always available, and is the parity oracle the others are checked against — useful as the expected value in your own tests.
 
@@ -328,8 +344,8 @@ There is no `exit_stack` parameter: the loaders are context managers, and your t
 - runtime-owned buffers are allocated in `__enter__()`
 - one runtime owns one shared execution arena across all `runtime.grgs`
 - concurrent calls on one runtime fail fast
-- cuSPARSE supports any declared `max_k >= 1`
-- GPU layouts can mix resident and streamed sparse blocks under a VRAM budget
-- `ring_buffer_size=0` is valid for GPU layouts only when the budget keeps every sparse block resident
+- both GPU backends support any declared `max_k >= 1`
+- CUDA layouts can mix resident and streamed sparse blocks under a VRAM budget
+- `ring_buffer_size=0` is valid for CUDA layouts only when the budget keeps every sparse block resident
 - the package root intentionally stays CPU-safe and does not re-export GPU runtime symbols
 - in `native=True` mode, `matmul` awaits only CuPy's *current* stream on the capture device, which is where a plain `cupy.asarray(...)` enqueues. Synchronize inputs yourself if you produce them on an explicit `cupy.cuda.Stream()`, or hand over a CuPy view of torch memory
