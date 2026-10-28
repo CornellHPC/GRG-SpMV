@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from time import perf_counter
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -31,6 +32,28 @@ def _copy_on_runtime_stream(runtime, dst, src) -> None:
         dst.copy_(src)
 
 
+@contextmanager
+def _prepared_io(grg, runtime, matrix, direction, k):
+    from pygrgl_spmv.backends.rocsparse import RocsparseRuntime
+
+    if isinstance(runtime, RocsparseRuntime):
+        import cupy as cp
+        with runtime.device, runtime.stream, grg.prepare_matmul_rocm(direction=direction, k=k) as op:
+            src = cp.asarray(matrix)
+            yield op, lambda: cp.copyto(op.input, src), runtime.stream.synchronize
+    else:
+        import torch
+        with grg.prepare_matmul_cuda(direction=direction, k=k) as op:
+            stream = _runtime_torch_stream(runtime)
+            if stream is None:
+                src = torch.from_numpy(matrix).to(device=op.input.device)
+            else:
+                with torch.cuda.device(op.input.device), torch.cuda.stream(stream):
+                    src = torch.from_numpy(matrix).to(device=op.input.device)
+            yield (op, lambda: _copy_on_runtime_stream(runtime, op.input, src),
+                   lambda: _synchronize_cuda_runtime(runtime))
+
+
 def benchmark_runtime(*, runtime_cls, layout, direction: str, k: int, dtype: np.dtype, warmup: int, trials: int) -> None:
     with runtime_cls(layout) as runtime:
         (grg,) = runtime.grgs
@@ -39,25 +62,17 @@ def benchmark_runtime(*, runtime_cls, layout, direction: str, k: int, dtype: np.
         matrix = rng.standard_normal((int(k), cols), dtype=dtype)
         times = []
         if getattr(runtime, "device", None) is not None:
-            import torch
-
-            with grg.prepare_matmul_cuda(direction=direction, k=int(k)) as op:
-                stream = _runtime_torch_stream(runtime)
-                if stream is None:
-                    src = torch.from_numpy(matrix).to(device=op.input.device)
-                else:
-                    with torch.cuda.device(op.input.device), torch.cuda.stream(stream):
-                        src = torch.from_numpy(matrix).to(device=op.input.device)
-                _synchronize_cuda_runtime(runtime)
+            with _prepared_io(grg, runtime, matrix, direction, int(k)) as (op, copy, synchronize):
+                synchronize()
                 for _ in range(int(warmup)):
-                    _copy_on_runtime_stream(runtime, op.input, src)
+                    copy()
                     op()
-                    _synchronize_cuda_runtime(runtime)
+                    synchronize()
                 for _ in range(int(trials)):
                     t0 = perf_counter()
-                    _copy_on_runtime_stream(runtime, op.input, src)
+                    copy()
                     op()
-                    _synchronize_cuda_runtime(runtime)
+                    synchronize()
                     times.append((perf_counter() - t0) * 1000.0)
         else:
             for _ in range(int(warmup)):

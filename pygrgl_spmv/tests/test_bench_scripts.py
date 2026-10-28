@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import json
+
 import numpy as np
 import pytest
 
 from pygrgl_spmv.backends.cusparse import SpMMAlgorithm
+from pygrgl_spmv.backends.rocsparse import SpMMAlgorithm as RocSpMMAlgorithm
 from scripts.bench.cusparse import (
     DEFAULT_CUSPARSE_PLAN_NAME,
     add_cusparse_plan_arg,
     parse_cusparse_plan,
 )
 from scripts.bench.cli import add_common_args, parse_args
+from scripts.bench.rocsparse import parse_rocsparse_plan
 from scripts.bench.run import benchmark_runtime
 
 
@@ -107,21 +111,33 @@ def test_cusparse_plan_arg_accepts_named_preset():
     assert args.plan.plan_down.order_b.name == "COL"
 
 
-def test_cusparse_plan_arg_accepts_json_plan():
-    args = _parse_cusparse_plan_args(
+@pytest.mark.parametrize(("parse_plan", "algorithm"), [
+    (parse_cusparse_plan, SpMMAlgorithm.CSR_ALG1), (parse_rocsparse_plan, RocSpMMAlgorithm.CSR),
+])
+def test_gpu_plan_arg_accepts_json_plan(parse_plan, algorithm):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--plan", type=parse_plan)
+    args = parser.parse_args(
         [
             "--plan",
-            (
-                '{"plan_up": {"store": "N", "fmt": "CSR", "opA": "N", '
-                '"opB": "N", "orderB": "ROW", "orderC": "ROW", '
-                '"algo": "CSR_ALG1"}, "plan_down": null}'
-            ),
+            json.dumps({"plan_up": {"store": "N", "fmt": "CSR", "opA": "N",
+                                   "opB": "N", "orderB": "ROW", "orderC": "ROW",
+                                   "algo": algorithm.name}, "plan_down": None}),
         ]
     )
-    assert args.plan.plan_up.algo == SpMMAlgorithm.CSR_ALG1
+    assert args.plan.plan_up.algo == algorithm
     assert args.plan.plan_down is None
 
 
-def test_cusparse_plan_arg_rejects_invalid_value():
+@pytest.mark.parametrize("parse_plan", [parse_cusparse_plan, parse_rocsparse_plan])
+@pytest.mark.parametrize("value", [
+    "not-a-plan", "[]", '{"unknown": {}}', '{"plan_up": []}',
+    '{"plan_down": 1}', '{"plan_up": {}}',
+])
+def test_gpu_plan_arg_rejects_invalid_value(parse_plan, value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_plan(value)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--plan", type=parse_plan)
     with pytest.raises(SystemExit):
-        _parse_cusparse_plan_args(["--plan", "not-a-plan"])
+        parser.parse_args(["--plan", value])

@@ -6,6 +6,7 @@ import pytest
 import scipy.sparse as sp
 
 from pygrgl_spmv.backends.mkl import MklPlan, MklPlanPair
+from pygrgl_spmv.backends.types import Direction
 from pygrgl_spmv.backends.reference import ReferencePlan, ReferencePlanPair
 from pygrgl_spmv.grg.artifact import save_grg_spmv
 from pygrgl_spmv.grg.sparse import binary_csr_from_parts
@@ -16,10 +17,12 @@ from pygrgl_spmv.tests.runtime._streaming_cases import _synthetic_state
 _BACKENDS = [
     pytest.param("reference", id="reference"),
     pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
-    pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cusparse]),
+    pytest.param("cusparse", id="cusparse", marks=pytest.mark.cusparse),
+    pytest.param("rocsparse", id="rocsparse", marks=pytest.mark.rocsparse),
 ]
 _GPU_BACKENDS = [
-    pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cusparse]),
+    pytest.param("cusparse", id="cusparse", marks=pytest.mark.cusparse),
+    pytest.param("rocsparse", id="rocsparse", marks=pytest.mark.rocsparse),
 ]
 
 
@@ -29,11 +32,13 @@ def _up_only_pair(backend_name: str):
             return ReferencePlanPair(plan_up=ReferencePlan(store="N", fmt="CSR"), plan_down=None)
         case "mkl":
             return MklPlanPair(plan_up=MklPlan(store="N", fmt="CSR", n_threads=1), plan_down=None)
-        case "cusparse":
-            from pygrgl_spmv.backends.cusparse import CusparsePlan, CusparsePlanPair
+        case "cusparse" | "rocsparse":
+            from pygrgl_spmv.tests.runtime._gpu import plan_types
+            Plan, Pair = plan_types(backend_name)
 
-            return CusparsePlanPair(
-                plan_up=CusparsePlan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
+            return Pair(
+                plan_up=Plan(store="N", fmt="CSR", op_a="N", op_b="N", order_b="ROW", order_c="ROW",
+                             algo="CSR_ROW_SPLIT" if backend_name == "rocsparse" else "DEFAULT"),
                 plan_down=None,
             )
         case _:
@@ -46,12 +51,13 @@ def _down_only_pair(backend_name: str):
             return ReferencePlanPair(plan_up=None, plan_down=ReferencePlan(store="T", fmt="CSC"))
         case "mkl":
             return MklPlanPair(plan_up=None, plan_down=MklPlan(store="T", fmt="CSC", n_threads=1))
-        case "cusparse":
-            from pygrgl_spmv.backends.cusparse import CusparsePlan, CusparsePlanPair
+        case "cusparse" | "rocsparse":
+            from pygrgl_spmv.tests.runtime._gpu import plan_types
+            Plan, Pair = plan_types(backend_name)
 
-            return CusparsePlanPair(
+            return Pair(
                 plan_up=None,
-                plan_down=CusparsePlan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
+                plan_down=Plan(store="T", fmt="CSC", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
             )
         case _:
             raise ValueError(backend_name)
@@ -69,12 +75,13 @@ def _nonsharing_full_pair(backend_name: str):
                 plan_up=MklPlan(store="N", fmt="CSR", n_threads=1),
                 plan_down=MklPlan(store="T", fmt="COO", n_threads=1),
             )
-        case "cusparse":
-            from pygrgl_spmv.backends.cusparse import CusparsePlan, CusparsePlanPair
+        case "cusparse" | "rocsparse":
+            from pygrgl_spmv.tests.runtime._gpu import plan_types
+            Plan, Pair = plan_types(backend_name)
 
-            return CusparsePlanPair(
-                plan_up=CusparsePlan(store="N", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
-                plan_down=CusparsePlan(store="T", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
+            return Pair(
+                plan_up=Plan(store="N", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
+                plan_down=Plan(store="T", fmt="COO", op_a="N", op_b="N", order_b="ROW", order_c="ROW", algo="DEFAULT"),
             )
         case _:
             raise ValueError(backend_name)
@@ -184,6 +191,20 @@ def test_one_sided_layout_drops_unused_storage(primary_artifact, backend_name):
         pair=_up_only_pair(backend_name),
         requirements=_requirements_for(backend_name, k=k),
     )
+    if backend_name == "rocsparse":
+        from pygrgl_spmv.backends.rocsparse import RocsparseRuntime
+        def owned_sparse_bytes(runtime):
+            arrays = {}
+            for artifact in runtime._artifacts:
+                for blocks in artifact.blocks.values():
+                    for _, _, block in blocks:
+                        for value in (block.struct0, block.struct1):
+                            arrays[value.data.ptr] = value.nbytes
+            return sum(arrays.values())
+        with RocsparseRuntime(full_layout) as full, RocsparseRuntime(up_only_layout) as up:
+            assert owned_sparse_bytes(up) < owned_sparse_bytes(full)
+            assert all(not a.blocks[Direction.DOWN] for a in up._artifacts)
+        return
     assert up_only_layout.bytes_total < full_layout.bytes_total
     if "workspace_down" in up_only_layout.bytes_by_category:
         assert up_only_layout.bytes_by_category["workspace_down"] == 0
@@ -200,6 +221,18 @@ def test_gpu_one_sided_layout_ignores_disabled_direction_requirements(primary_ar
         pair=pair,
         requirements=_one_sided_requirements(direction, disabled_k=1, disabled_miss=False),
     )
+    if backend_name == "rocsparse":
+        # ROCm allocates per prepared width and has no VRAM-budget planner.
+        # Check the corresponding ownership contract on the allocated arrays.
+        hostile = build_layout_for_backend(
+            backend_name, [primary_artifact], pair=pair,
+            requirements=_one_sided_requirements(direction, disabled_k=1024, disabled_miss=True),
+        )
+        runtime_cls = runtime_cls_for_backend(backend_name)
+        with runtime_cls(benign) as a, runtime_cls(hostile) as b:
+            assert a._aux.shape == b._aux.shape
+            assert a._aux.nbytes == b._aux.nbytes
+        return
     hostile = build_layout_for_backend(
         backend_name,
         [primary_artifact],
@@ -229,7 +262,17 @@ def test_gpu_dense_arena_aux_rows_include_mutations_with_sparse_selector(tmp_pat
     side_io_rows = 1
     aux_rows = 5
     expected = int((io0_rows + side_io_rows + aux_rows) * 2 * np.dtype(DATA_DTYPE).itemsize)
-    assert layout.bytes_by_category["dense_arena"] == expected
+    if backend_name == "cusparse":
+        assert layout.bytes_by_category["dense_arena"] == expected
+    else:
+        with runtime_cls_for_backend(backend_name)(layout) as runtime:
+            assert runtime._aux.shape == (aux_rows, 2)
+            assert runtime._aux.nbytes == aux_rows * 2 * np.dtype(DATA_DTYPE).itemsize
+    # Sparse selectors with unused mutation rows must still produce full output.
+    with runtime_cls_for_backend(backend_name)(layout) as runtime:
+        grg = runtime.grgs[0]
+        np.testing.assert_array_equal(grg.matmul(np.zeros((2, 1)), "up", init=np.ones(2)),
+                                      np.tile([1., 0., 0., 0., 0.], (2, 1)))
 
 
 @pytest.mark.parametrize("backend_name", _BACKENDS)

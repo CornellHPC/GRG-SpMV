@@ -135,17 +135,33 @@ def build_cusparse_layout(
     )
 
 
-def nonreference_backend_cases():
-    """Both backends unconditionally, selected by marks.
+def build_rocsparse_layout(
+    artifacts,
+    *,
+    dtype=np.float64,
+    requirements: RuntimeRequirements | None = None,
+    pair=None,
+    device: int = 0,
+    stream=None,
+):
+    from pygrgl_spmv.backends.rocsparse import plan_rocsparse_layout
 
-    Probing here instead dropped the cusparse param outright on a GPU-less host, so
-    `--backend=cusparse` reported success having run no GPU case at all -- and the
-    probe ran at import, before the collection hook, importing torch and cupy even
-    under `--backend=mkl`.
-    """
+    return plan_rocsparse_layout(
+        artifacts=[Path(path) for path in artifacts],
+        pair=pair,
+        dtype=np.dtype(dtype),
+        requirements=full_requirements() if requirements is None else requirements,
+        device=device,
+        stream=stream,
+    )
+
+
+def nonreference_backend_cases():
+    """Declare every nonreference backend; collection marks control availability."""
     return (
         pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
-        pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cusparse]),
+        pytest.param("cusparse", id="cusparse", marks=pytest.mark.cusparse),
+        pytest.param("rocsparse", id="rocsparse", marks=pytest.mark.rocsparse),
     )
 
 
@@ -157,6 +173,8 @@ def build_layout_for_backend(backend_name: str, artifacts, **kwargs):
             return build_mkl_layout(artifacts, **kwargs)
         case "cusparse":
             return build_cusparse_layout(artifacts, **kwargs)
+        case "rocsparse":
+            return build_rocsparse_layout(artifacts, **kwargs)
         case _:
             raise ValueError(f"unknown backend {backend_name!r}")
 
@@ -171,5 +189,9 @@ def runtime_cls_for_backend(backend_name: str):
             from pygrgl_spmv.backends.cusparse import CusparseRuntime
 
             return CusparseRuntime
+        case "rocsparse":
+            from pygrgl_spmv.backends.rocsparse import RocsparseRuntime
+
+            return RocsparseRuntime
         case _:
             raise ValueError(f"unknown backend {backend_name!r}")

@@ -1,8 +1,9 @@
-"""rocSPARSE plans and typed bindings; device libraries load lazily."""
+"""Resident, single-GPU ROCm backend (CuPy, rocSPARSE, HIP VMM)."""
 
 from .plan import RocsparsePlan, RocsparsePlanPair, DenseOrder, Operation, SpMMAlgorithm, SpMVAlgorithm
+from .backend import RocsparseRuntime, RocsparseLayout, plan_rocsparse_layout
 
 __all__ = [
-    "RocsparsePlan", "RocsparsePlanPair", "DenseOrder", "Operation",
-    "SpMMAlgorithm", "SpMVAlgorithm",
+    "RocsparsePlan", "RocsparsePlanPair", "RocsparseRuntime", "RocsparseLayout",
+    "plan_rocsparse_layout", "DenseOrder", "Operation", "SpMMAlgorithm", "SpMVAlgorithm",
 ]

@@ -68,6 +68,7 @@ __all__ = [
     "is_mkl_available",
     "load",
     "load_cusparse",
+    "load_rocsparse",
     "load_many",
     "load_mkl",
     "load_reference",
@@ -279,6 +280,7 @@ def artifact_for(grg_path, out_dir, *, dtype=np.float64) -> Path:
 #: ``native``, ``device``, ``n_threads`` and ``plans`` were named parameters that
 #: bypassed the check entirely and were dropped by backends that cannot honour them.
 _EXTRA_KW = {
+    "rocsparse": frozenset({"capture", "device", "native", "pair", "shared_ones", "allow_residency"}),
     "reference": frozenset({"plans"}),
     "mkl": frozenset({"n_threads", "optimize"}),
     "cusparse": frozenset({"allow_residency", "capture", "device", "native", "vram_budget_mb"}),
@@ -348,7 +350,7 @@ def load_many(
 ) -> Iterator[list]:
     """Load ``.grg_spmv`` artifacts on *backend* and yield the bound GRGs.
 
-    Every resource -- runtime arenas, cuSPARSE handles, captured CUDA graphs and
+    Every resource -- runtime arenas, vendor handles, captured GPU graphs and
     their prepared-op contexts -- is released on exit, in dependency order. The
     returned GRGs must not be used afterwards.
 
@@ -401,6 +403,11 @@ def load_many(
 
             with _adaptor_loaded(paths, make_backend_cusparse(**kw), req, dtype) as grgs:
                 yield grgs
+        case "rocsparse":
+            from pygrgl_spmv.adaptor import make_backend_rocsparse
+
+            with _adaptor_loaded(paths, make_backend_rocsparse(**kw), req, dtype) as grgs:
+                yield grgs
 
 
 @contextlib.contextmanager
@@ -433,3 +440,8 @@ def load_mkl(artifact, **kwargs):
 def load_cusparse(artifact, **kwargs):
     """:func:`load` pinned to the cuSPARSE backend."""
     return load(artifact, backend="cusparse", **kwargs)
+
+
+def load_rocsparse(artifact, **kwargs):
+    """:func:`load` pinned to the resident rocSPARSE backend."""
+    return load(artifact, backend="rocsparse", **kwargs)

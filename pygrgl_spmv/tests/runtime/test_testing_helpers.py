@@ -300,7 +300,7 @@ def test_load_yields_a_working_grg_on_every_backend(primary_artifact, primary_gr
 def test_per_backend_sugar_matches_the_primitive(primary_artifact, backend):
     if not testing.is_available(backend):
         pytest.skip(f"{backend} unavailable")
-    sugar = {"reference": testing.load_reference, "mkl": testing.load_mkl, "cusparse": testing.load_cusparse}
+    sugar = {"reference": testing.load_reference, "mkl": testing.load_mkl, "cusparse": testing.load_cusparse, "rocsparse": testing.load_rocsparse}
     with sugar[backend](primary_artifact, max_k=2) as a, testing.load(
         primary_artifact, backend=backend, max_k=2
     ) as b:
@@ -363,12 +363,17 @@ def test_load_rejects_an_unknown_backend(primary_artifact):
         pytest.param("cusparse", "allow_resideny", id="cusparse-typo"),
         pytest.param("cusparse", "ring_buffer_size", id="cusparse-unsupported"),
         pytest.param("cusparse", "stream", id="cusparse-hardcoded"),
+        pytest.param("rocsparse", "allow_resideny", id="rocsparse-typo"),
+        pytest.param("rocsparse", "ring_buffer_size", id="rocsparse-unsupported"),
+        pytest.param("rocsparse", "stream", id="rocsparse-hardcoded"),
+        pytest.param("rocsparse", "vram_budget_mb", id="rocsparse-streaming"),
         pytest.param("mkl", "vram_budget_mb", id="mkl-wrong-backend"),
         # Named parameters, so they bypassed the allowlist: the README-recommended
         # load(backend="reference", capture=True) returned an eager GRG with no
         # error, and a downstream "captured replay" test passed without a graph.
         pytest.param("reference", "capture", id="reference-capture"),
         pytest.param("cusparse", "n_threads", id="cusparse-n_threads"),
+        pytest.param("rocsparse", "n_threads", id="rocsparse-n_threads"),
         pytest.param("mkl", "native", id="mkl-native"),
         pytest.param("mkl", "plans", id="mkl-plans"),
     ],

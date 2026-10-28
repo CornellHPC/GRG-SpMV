@@ -612,6 +612,34 @@ class CusparseBackendConfig:
     native: bool = False
 
 
+@dataclass(frozen=True)
+class RocsparseBackendConfig:
+    """Configuration for the resident rocSPARSE GPU backend.
+
+    device: integer ordinal shared by all files; multi-GPU is unsupported.
+    capture: if True, capture HIP graphs after loading.
+    native: if True, captured matmul keeps CuPy I/O on the device. Ignored
+        without capture.
+    pair: directional plans, or None for the library default.
+    shared_ones: "vmm" aliases shared values; "materialized" allocates each view.
+    """
+    device: int = 0
+    capture: bool = False
+    native: bool = False
+    pair: object = None
+    shared_ones: str = "vmm"
+
+
+def _device_ordinal(device) -> int:
+    """Validate a scalar ordinal without initializing a GPU runtime."""
+    if isinstance(device, bool) or not isinstance(device, Integral):
+        raise TypeError(f"device must be a non-bool integer ordinal, got {type(device).__name__}")
+    device = int(device)
+    if device < 0:
+        raise ValueError("device must be non-negative")
+    return device
+
+
 # ---------------------------------------------------------------------------
 # Backend factory functions
 # ---------------------------------------------------------------------------
@@ -639,14 +667,13 @@ def make_backend_cusparse(device=0, allow_residency=True, vram_budget_mb=0, capt
     vram_budget_mb: GPU memory cap in MiB, applied only when allow_residency is
         False (streaming mode), where it must be > 0.
     capture: if True, CUDA graphs are captured after loading.
-    native: if True, matmul uses GPU-native I/O (requires capture=True).
+    native: if True, captured matmul keeps CuPy I/O on the device. Ignored
+        without capture.
     """
     if kwargs:
         raise TypeError(f"make_backend_cusparse() got unexpected keyword arguments: {sorted(kwargs)}")
-    if not isinstance(device, (int, dict)):
-        raise TypeError(f"device must be int or dict, got {type(device).__name__}")
-    if isinstance(device, int) and device < 0:
-        raise ValueError(f"device must be >= 0, got {device}")
+    if not isinstance(device, dict):
+        device = _device_ordinal(device)
     if not isinstance(vram_budget_mb, int):
         raise TypeError(f"vram_budget_mb must be int, got {type(vram_budget_mb).__name__}")
     if vram_budget_mb < 0:
@@ -659,6 +686,35 @@ def make_backend_cusparse(device=0, allow_residency=True, vram_budget_mb=0, capt
         vram_budget_mb=int(vram_budget_mb),
         capture=bool(capture),
         native=bool(native),
+    )
+
+
+def make_backend_rocsparse(device=0, capture=False, native=False, *, pair=None,
+                           shared_ones="vmm", allow_residency=True, **kwargs) -> RocsparseBackendConfig:
+    """Create a resident rocSPARSE backend config.
+
+    device: integer ordinal shared by all files; multi-GPU is unsupported.
+    capture: if True, HIP graphs are captured after loading.
+    native: if True, captured matmul keeps CuPy I/O on the device. Ignored
+        without capture.
+    pair/shared_ones: forwarded to the resident layout planner.
+    allow_residency: must be True; streaming is unsupported.
+    """
+    if kwargs:
+        raise TypeError(f"make_backend_rocsparse() got unexpected keyword arguments: {sorted(kwargs)}")
+    if isinstance(device, dict):
+        raise TypeError("rocSPARSE requires a single integer device ordinal; multi-GPU is unsupported")
+    device = _device_ordinal(device)
+    if not allow_residency:
+        raise ValueError("rocSPARSE streaming is unsupported")
+    if shared_ones not in {"vmm", "materialized"}:
+        raise ValueError("shared_ones must be 'vmm' or 'materialized'")
+    return RocsparseBackendConfig(
+        device=device,
+        capture=bool(capture),
+        native=bool(native),
+        pair=pair,
+        shared_ones=shared_ones,
     )
 
 
@@ -861,9 +917,9 @@ def _validate_dtype(dtype) -> np.dtype:
 
 
 def _validate_backend(backend) -> None:
-    if not isinstance(backend, (MklBackendConfig, CusparseBackendConfig)):
+    if not isinstance(backend, (MklBackendConfig, CusparseBackendConfig, RocsparseBackendConfig)):
         raise TypeError(
-            f"backend must be MklBackendConfig or CusparseBackendConfig, "
+            f"backend must be MklBackendConfig, CusparseBackendConfig or RocsparseBackendConfig, "
             f"got {type(backend).__name__}"
         )
 
@@ -1036,9 +1092,10 @@ def _check_device(device_id: int) -> None:
 
 
 def _resolve_device(cfg: CusparseBackendConfig, path: Path) -> int:
-    if isinstance(cfg.device, int):
-        _check_device(cfg.device)
-        return cfg.device
+    if not isinstance(cfg.device, dict):
+        device_id = _device_ordinal(cfg.device)
+        _check_device(device_id)
+        return device_id
     if path.stem not in cfg.device:
         raise KeyError(
             f"file stem {path.stem!r} not found in device config; "
@@ -1050,7 +1107,7 @@ def _resolve_device(cfg: CusparseBackendConfig, path: Path) -> int:
             f"device config for {path.stem!r} is missing 'cuda_device' key; "
             f"got: {entry!r}"
         )
-    device_id = entry["cuda_device"]
+    device_id = _device_ordinal(entry["cuda_device"])
     _check_device(device_id)
     return device_id
 
@@ -1341,6 +1398,22 @@ def _load_cusparse_multi(paths, cfg, req, stack, dtype):
     return [grg_by_index[i] for i in range(len(paths))]
 
 
+def _load_rocsparse_multi(paths, cfg, req, stack, dtype):
+    from pygrgl_spmv.backends.rocsparse import RocsparseRuntime, plan_rocsparse_layout
+    import cupy as cp
+
+    if cfg.capture:
+        raise NotImplementedError("ROCm capture is not implemented")
+    with cp.cuda.Device(cfg.device):
+        stream = cp.cuda.Stream(non_blocking=True)
+        layout = plan_rocsparse_layout(
+            artifacts=paths, pair=cfg.pair, dtype=dtype, requirements=_bare_req(req),
+            device=cfg.device, stream=stream, shared_ones=cfg.shared_ones,
+        )
+        runtime = stack.enter_context(RocsparseRuntime(layout))
+        return list(runtime.grgs)
+
+
 # ---------------------------------------------------------------------------
 # Public load functions
 # ---------------------------------------------------------------------------
@@ -1360,9 +1433,9 @@ def load_grg_spmv_multi(filenames, backend, req, stack, dtype=np.float64):
     req may be a RunConfigs or a plain RuntimeRequirements.
 
     For the MKL backend each file gets its own runtime (entered into *stack*
-    sequentially). For the cuSPARSE backend, files are grouped by device and
-    each device group is loaded in parallel. When cfg.capture=True, each GRG
-    is wrapped in a CapturedBoundGRG with pre-captured CUDA graphs.
+    sequentially). GPU backends share a runtime per device; cuSPARSE loads
+    different device groups in parallel, while rocSPARSE supports one device.
+    With capture=True, each GRG is wrapped with pre-captured vendor graphs.
     """
     paths = [Path(f) for f in filenames]
     if not paths:
@@ -1376,6 +1449,8 @@ def load_grg_spmv_multi(filenames, backend, req, stack, dtype=np.float64):
 
     if isinstance(backend, MklBackendConfig):
         return _load_mkl_multi(paths, backend, req, stack, dtype)
+    elif isinstance(backend, RocsparseBackendConfig):
+        return _load_rocsparse_multi(paths, backend, req, stack, dtype)
     else:
         return _load_cusparse_multi(paths, backend, req, stack, dtype)
 
@@ -1388,8 +1463,10 @@ __all__ = [
     "RunConfigs",
     "MklBackendConfig",
     "CusparseBackendConfig",
+    "RocsparseBackendConfig",
     "make_backend_mkl",
     "make_backend_cusparse",
+    "make_backend_rocsparse",
     "make_runconfig_kernel",
     "make_runconfig_pca",
     "make_runconfig_bolt",

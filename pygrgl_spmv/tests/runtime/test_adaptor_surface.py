@@ -36,6 +36,7 @@ from pygrgl_spmv.adaptor import (
 from pygrgl_spmv import adaptor as adaptor_mod
 from pygrgl_spmv.backends.types import Direction
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
+from pygrgl_spmv.tests.runtime._gpu import GPU_BACKENDS, backend_factory
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +72,23 @@ def test_make_backend_cusparse_defaults_and_dict():
     assert make_backend_cusparse(device=mapping).device is mapping
 
 
+@pytest.mark.parametrize("backend", ["cusparse", "rocsparse"])
+@pytest.mark.parametrize("device", [0, 2, np.int32(0), np.int64(2)])
+def test_make_backend_gpu_normalizes_integer_devices(backend, device):
+    cfg = backend_factory(backend)(device=device)
+    assert type(cfg.device) is int
+    assert cfg.device == device
+
+
 @pytest.mark.parametrize(
     ("kwargs", "exc", "match"),
     [
-        pytest.param({"device": -1}, ValueError, "device must be >= 0", id="negative-device"),
-        pytest.param({"device": "0"}, TypeError, "device must be int or dict", id="string-device"),
+        pytest.param({"device": -1}, ValueError, "device must be non-negative", id="negative-device"),
+        pytest.param({"device": np.int64(-1)}, ValueError, "device must be non-negative", id="negative-numpy-device"),
+        pytest.param({"device": "0"}, TypeError, "non-bool integer ordinal", id="string-device"),
+        pytest.param({"device": 0.5}, TypeError, "non-bool integer ordinal", id="fraction-device"),
+        pytest.param({"device": True}, TypeError, "non-bool integer ordinal", id="true-device"),
+        pytest.param({"device": False}, TypeError, "non-bool integer ordinal", id="false-device"),
         pytest.param({"vram_budget_mb": -1}, ValueError, "must be >= 0", id="negative-budget"),
         pytest.param({"vram_budget_mb": 1.5}, TypeError, "must be int", id="float-budget"),
         pytest.param(
@@ -261,6 +274,29 @@ def test_resolve_device_dict_form_and_errors(tmp_path):
         _resolve_device(make_backend_cusparse(device=9999), path)
 
 
+@pytest.mark.parametrize("device", [True, False, "0", 0.5, -1, np.int64(-1), 0, np.int64(1)])
+def test_resolve_device_map_validates_before_hardware_probe(tmp_path, monkeypatch, device):
+    checked = []
+    monkeypatch.setattr(adaptor_mod, "_check_device", checked.append)
+    mapping = {"chr1": {"cuda_device": device}}
+    cfg = make_backend_cusparse(device=mapping)
+    assert cfg.device is mapping
+    path = tmp_path / "chr1.grg_spmv"
+    if isinstance(device, bool) or not isinstance(device, (int, np.integer)):
+        with pytest.raises(TypeError, match="non-bool integer ordinal"):
+            _resolve_device(cfg, path)
+        assert checked == []
+    elif device < 0:
+        with pytest.raises(ValueError, match="non-negative"):
+            _resolve_device(cfg, path)
+        assert checked == []
+    else:
+        resolved = _resolve_device(cfg, path)
+        assert type(resolved) is int
+        assert checked == [resolved] == [device]
+    assert mapping["chr1"]["cuda_device"] is device
+
+
 # ---------------------------------------------------------------------------
 # load_grg_spmv_* argument validation
 # ---------------------------------------------------------------------------
@@ -330,7 +366,7 @@ def _expected_miss(grg_obj, k: int) -> np.ndarray:
     [
         pytest.param("reference", id="reference"),
         pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
-        pytest.param("cusparse", id="cusparse", marks=[pytest.mark.cusparse]),
+        pytest.param("cusparse", id="cusparse", marks=pytest.mark.cusparse),
     ],
 )
 @pytest.mark.parametrize("k", [1, 2], ids=["k1", "k2"])

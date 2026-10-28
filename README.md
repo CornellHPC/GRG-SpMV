@@ -173,13 +173,13 @@ The adaptor exposes two backends: MKL on CPU and cuSPARSE on GPU.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `device` | `0` | CUDA device index, or a per-file dict. Files on one device share a layout and runtime; separate devices load in parallel. |
+| `device` | `0` | Non-negative integer ordinal (NumPy integers accepted, booleans rejected). CUDA also accepts a per-file dict with the same ordinal contract and loads device groups in parallel. Files on one device share a layout and runtime. |
 | `allow_residency` | `True` | Keep every sparse block resident in VRAM. `False` selects streaming mode. |
 | `vram_budget_mb` | `0` | VRAM cap in MiB. Used only in streaming mode, where it must be `> 0`; ignored when resident. |
 | `capture` | `False` | Capture CUDA graphs after loading and return a `CapturedBoundGRG`, so matmul replays a graph instead of re-issuing kernels. |
 | `native` | `False` | Keep matmul I/O on device (CuPy in, CuPy out, no host copies). Requires `capture=True` — on its own it is silently ignored. In this mode `miss` is an in-place accumulator on the device: pass the array you will read afterwards, never a fresh `cupy.asarray(host_array)`, or the counts are written to a temporary and lost. |
 
-Both `n_threads` and `device` accept a mapping keyed by artifact file stem. That is the shape of the JSON configs used by the Mikado benchmark harness (`benchmark/configs/` in the [mikado](https://github.com/CornellHPC/mikado) repository):
+MKL `n_threads` and CUDA `device` also accept mappings keyed by artifact file stem:
 
 ```json
 {"chr1": {"cuda_device": 0},        "chr2": {"cuda_device": 1}}

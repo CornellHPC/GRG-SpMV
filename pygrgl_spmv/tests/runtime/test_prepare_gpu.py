@@ -7,15 +7,13 @@ import pytest
 from pygrgl_spmv.backends.types import InitMode
 from pygrgl_spmv.testing import is_mkl_available
 from pygrgl_spmv.tests.conftest import DATA_DTYPE, tol
+from pygrgl_spmv.tests.runtime._gpu import GPU_BACKENDS as _GPU_BACKENDS, prepare, copy_to, to_host
 from pygrgl_spmv.tests.runtime._runtime_builders import (
     build_layout_for_backend,
     full_requirements,
     runtime_cls_for_backend,
 )
 
-_GPU_BACKENDS = (
-    pytest.param("cusparse", marks=[pytest.mark.cusparse], id="cusparse"),
-)
 _DIRECTIONS = (
     pytest.param("up", pygrgl.TraversalDirection.UP, id="up"),
     pytest.param("down", pygrgl.TraversalDirection.DOWN, id="down"),
@@ -52,10 +50,10 @@ def _prepare_init(rng: np.random.Generator, grg, *, init_mode: InitMode, k: int)
             raise ValueError(f"unexpected init mode {init_mode!r}")
 
 
-def _mode_seed(backend_name: str, *, direction: str, by_individual: bool, init_mode: InitMode) -> int:
+def _mode_seed(*, direction: str, by_individual: bool, init_mode: InitMode) -> int:
     return (
         72_100
-        + (1_000 if backend_name == "cusparse" else 0)
+        + 1_000
         + (100 if direction == "down" else 0)
         + (10 if by_individual else 0)
         + {InitMode.NONE: 0, InitMode.VECTOR: 1, InitMode.MATRIX: 2, InitMode.XTX: 3}[init_mode]
@@ -75,10 +73,9 @@ def _run_prepared(
     use_miss: bool = False,
     miss_input: np.ndarray | None = None,
 ):
-    torch = pytest.importorskip("torch")
     with runtime_cls(layout) as runtime:
         (grg,) = runtime.grgs
-        with grg.prepare_matmul_cuda(
+        with prepare(grg,
             direction=direction,
             k=int(x.shape[0]),
             by_individual=by_individual,
@@ -86,20 +83,20 @@ def _run_prepared(
             init_mode=init_mode,
             use_miss=use_miss,
         ) as op:
-            op.input.copy_(torch.from_numpy(x).to(device=op.input.device))
+            copy_to(op.input, x)
             if miss_input is not None:
-                op.miss_input.copy_(torch.from_numpy(miss_input).to(device=op.miss_input.device))
+                copy_to(op.miss_input, miss_input)
             if init_mode == InitMode.VECTOR:
                 assert init is not None
-                op.init_vector.copy_(torch.from_numpy(init).to(device=op.init_vector.device))
+                copy_to(op.init_vector, init)
             elif init_mode == InitMode.MATRIX:
                 assert init is not None
-                op.init_matrix.copy_(torch.from_numpy(init).to(device=op.init_matrix.device))
+                copy_to(op.init_matrix, init)
             op()
-            output = op.output.cpu().numpy().copy()
+            output = to_host(op.output)
             miss_output = None
             if use_miss and direction == "up":
-                miss_output = op.miss_output.cpu().numpy().copy()
+                miss_output = to_host(op.miss_output)
             return output, miss_output
 
 
@@ -110,28 +107,29 @@ def _run_prepared(
         pytest.param("mkl", id="mkl", marks=pytest.mark.mkl),
     ),
 )
-def test_cpu_backends_reject_prepare_matmul_cuda(primary_artifact, backend_name):
+def test_cpu_backends_reject_prepare_matmul_gpu(primary_artifact, backend_name):
     if backend_name == "mkl" and not is_mkl_available():
         pytest.skip("MKL runtime unavailable")
     layout = build_layout_for_backend(backend_name, [primary_artifact], requirements=full_requirements(max_k_up=2, max_k_down=2))
     runtime_cls = runtime_cls_for_backend(backend_name)
     with runtime_cls(layout) as runtime:
         (grg,) = runtime.grgs
-        with pytest.raises(NotImplementedError):
-            grg.prepare_matmul_cuda(direction="up", k=1)
+        for method in (grg.prepare_matmul_cuda, grg.prepare_matmul_rocm):
+            with pytest.raises(NotImplementedError):
+                method(direction="up", k=1)
 
 
 @pytest.mark.parametrize("backend_name", _GPU_BACKENDS)
 @pytest.mark.parametrize(("direction", "direction_enum"), _DIRECTIONS)
 @pytest.mark.parametrize("by_individual", [False, True], ids=["by-node", "by-individual"])
 @pytest.mark.parametrize("init_mode", _INIT_MODES)
-def test_prepare_cuda_matches_pygrgl_modes(missing_artifact, missing_grg, backend_name, direction, direction_enum, by_individual, init_mode):
+def test_prepare_gpu_matches_pygrgl_modes(missing_artifact, missing_grg, backend_name, direction, direction_enum, by_individual, init_mode):
     if by_individual and missing_grg.num_individuals == missing_grg.num_samples:
         pytest.skip("fixture is not grouped by individuals")
     k = 2
     layout = build_layout_for_backend(backend_name, [missing_artifact], requirements=full_requirements(max_k_up=4, max_k_down=4))
     runtime_cls = runtime_cls_for_backend(backend_name)
-    rng = np.random.default_rng(_mode_seed(backend_name, direction=direction, by_individual=by_individual, init_mode=init_mode))
+    rng = np.random.default_rng(_mode_seed(direction=direction, by_individual=by_individual, init_mode=init_mode))
     x = rng.standard_normal((k, _input_cols(missing_grg, direction=direction, by_individual=by_individual)), dtype=DATA_DTYPE)
     init = _prepare_init(rng, missing_grg, init_mode=init_mode, k=k)
     expected = np.asarray(pygrgl.matmul(missing_grg, x, direction_enum, by_individual=by_individual, init=init))
@@ -151,12 +149,11 @@ def test_prepare_cuda_matches_pygrgl_modes(missing_artifact, missing_grg, backen
 @pytest.mark.parametrize("backend_name", _GPU_BACKENDS)
 @pytest.mark.parametrize(("direction", "direction_enum"), _DIRECTIONS)
 @pytest.mark.parametrize("init_mode", _REUSABLE_INIT_MODES)
-def test_prepare_cuda_reuses_init_buffer(primary_artifact, primary_grg, backend_name, direction, direction_enum, init_mode):
-    torch = pytest.importorskip("torch")
+def test_prepare_gpu_reuses_init_buffer(primary_artifact, primary_grg, backend_name, direction, direction_enum, init_mode):
     k = 2
     layout = build_layout_for_backend(backend_name, [primary_artifact], requirements=full_requirements(max_k_up=4, max_k_down=4))
     runtime_cls = runtime_cls_for_backend(backend_name)
-    rng = np.random.default_rng(_mode_seed(backend_name, direction=direction, by_individual=False, init_mode=init_mode) + 500)
+    rng = np.random.default_rng(_mode_seed(direction=direction, by_individual=False, init_mode=init_mode) + 500)
     x0 = rng.standard_normal((k, _input_cols(primary_grg, direction=direction, by_individual=False)), dtype=DATA_DTYPE)
     x1 = rng.standard_normal(x0.shape, dtype=DATA_DTYPE)
     init = _prepare_init(rng, primary_grg, init_mode=init_mode, k=k)
@@ -164,24 +161,24 @@ def test_prepare_cuda_reuses_init_buffer(primary_artifact, primary_grg, backend_
     expected1 = np.asarray(pygrgl.matmul(primary_grg, x1, direction_enum, init=init))
     with runtime_cls(layout) as runtime:
         (grg,) = runtime.grgs
-        with grg.prepare_matmul_cuda(direction=direction, k=k, init_mode=init_mode) as op:
+        with prepare(grg, direction=direction, k=k, init_mode=init_mode) as op:
             if init_mode == InitMode.VECTOR:
-                op.init_vector.copy_(torch.from_numpy(init).to(device=op.init_vector.device))
+                copy_to(op.init_vector, init)
             else:
-                op.init_matrix.copy_(torch.from_numpy(init).to(device=op.init_matrix.device))
-            op.input.copy_(torch.from_numpy(x0).to(device=op.input.device))
+                copy_to(op.init_matrix, init)
+            copy_to(op.input, x0)
             op()
-            actual0 = op.output.cpu().numpy().copy()
-            op.input.copy_(torch.from_numpy(x1).to(device=op.input.device))
+            actual0 = to_host(op.output)
+            copy_to(op.input, x1)
             op()
-            actual1 = op.output.cpu().numpy().copy()
+            actual1 = to_host(op.output)
     atol, rtol = tol(DATA_DTYPE)
     np.testing.assert_allclose(actual0, expected0, atol=atol, rtol=rtol)
     np.testing.assert_allclose(actual1, expected1, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("backend_name", _GPU_BACKENDS)
-def test_prepare_cuda_emit_all_nodes_by_individual(primary_artifact, primary_grg, backend_name):
+def test_prepare_gpu_emit_all_nodes_by_individual(primary_artifact, primary_grg, backend_name):
     if primary_grg.num_individuals == primary_grg.num_samples:
         pytest.skip("fixture is not grouped by individuals")
     k = 2
@@ -203,7 +200,7 @@ def test_prepare_cuda_emit_all_nodes_by_individual(primary_artifact, primary_grg
 
 
 @pytest.mark.parametrize("backend_name", _GPU_BACKENDS)
-def test_prepare_cuda_missing_up_matches_pygrgl(missing_artifact, missing_grg, backend_name):
+def test_prepare_gpu_missing_up_matches_pygrgl(missing_artifact, missing_grg, backend_name):
     if missing_grg.num_individuals == missing_grg.num_samples:
         pytest.skip("fixture is not grouped by individuals")
     k = 2
@@ -225,3 +222,20 @@ def test_prepare_cuda_missing_up_matches_pygrgl(missing_artifact, missing_grg, b
     np.testing.assert_allclose(actual, expected, atol=atol, rtol=rtol)
     assert actual_miss is not None
     np.testing.assert_allclose(actual_miss, miss_expected, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("backend_name", _GPU_BACKENDS)
+def test_retained_prepared_handle_does_not_pin_closed_runtime_arenas(primary_artifact, backend_name):
+    import weakref
+
+    layout = build_layout_for_backend(backend_name, [primary_artifact])
+    with runtime_cls_for_backend(backend_name)(layout) as runtime:
+        with prepare(runtime.grgs[0], direction="up", k=1) as op:
+            levels = op._dense_state.levels if backend_name == "rocsparse" else runtime._up_level_bufs
+            arenas = [weakref.ref(a) for a in levels]
+            del levels
+            op()
+            runtime.__exit__(None, None, None)
+            assert all(ref() is None for ref in arenas)
+            with pytest.raises(RuntimeError, match="entered"):
+                op()

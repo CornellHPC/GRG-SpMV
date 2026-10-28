@@ -19,6 +19,8 @@ import scipy.sparse as sp
 from pygrgl_spmv.backends._cuda_stream import CudaStreamToken, _cuda_stream_device, parse_cuda_device, parse_cuda_stream
 from pygrgl_spmv.backends.base import (
     BudgetItem,
+    _SelectorLevels,
+    _selector_levels,
     _copy_struct_checked,
     _layout_struct_dtypes,
     _require_struct_dtype,
@@ -27,7 +29,6 @@ from pygrgl_spmv.backends.base import (
     materialize_sparse_block,
     relink_stream_dependencies,
     sparse_structure_lengths,
-    split_selector_by_level,
     stored_block_shape,
 )
 from pygrgl_spmv.backends.cusparse.ffi import (
@@ -184,13 +185,6 @@ class _CuOp:
     host0: np.ndarray | None
     host1: np.ndarray | None
     prev_in_slot: tuple[int, int] | None
-
-
-@dataclass(frozen=True)
-class _SelectorLevels:
-    rows_by_level: list[Any]
-    cols_by_level: list[Any]
-    row_unique: bool
 
 
 @dataclass
@@ -598,15 +592,6 @@ def _needs_explicit_source(plan: CusparsePlan) -> bool:
     if plan.op_b == Operation.T and plan.order_b != plan.order_c:
         return False
     return True
-
-
-def _selector_levels(cp, selector: sp.csr_matrix, level_offsets: np.ndarray) -> _SelectorLevels:
-    pairs = split_selector_by_level(selector, level_offsets)
-    return _SelectorLevels(
-        rows_by_level=[cp.asarray(rows) for rows, _ in pairs],
-        cols_by_level=[cp.asarray(cols) for _, cols in pairs],
-        row_unique=bool(np.all(np.diff(np.asarray(selector.indptr)) <= 1)),
-    )
 
 
 def _query_spmm_buffer_sizes(
@@ -1408,6 +1393,8 @@ class CusparseRuntime:
             raise
 
     def _prepare_matmul_cuda(self, grg: BoundGRG, spec: _GpuMatmulSpec) -> _CusparsePreparedMatmul:
+        if not self._entered:
+            raise RuntimeError("CusparseRuntime must be entered before preparation")
         if spec.direction == Direction.UP and self.layout.pair.plan_up is None:
             raise ValueError("UP plan is not configured")
         if spec.direction == Direction.DOWN and self.layout.pair.plan_down is None:
@@ -1444,6 +1431,8 @@ class CusparseRuntime:
         return entry
 
     def _release_dense_descriptors(self, artifact: _CuArtifact, direction: Direction, k: int, entry: _PreparedDenseEntry) -> None:
+        if not self._entered:
+            return  # Runtime teardown already released the descriptors.
         key = int(k)
         entries = _dense_entries(artifact, direction)
         if entries.get(key) is not entry:
